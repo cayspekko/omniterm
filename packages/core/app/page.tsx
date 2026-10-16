@@ -1,30 +1,33 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import WorkspacePanel from './components/WorkspacePanel';
-import TabBar from './components/TabBar';
-import FilePanel from './components/FilePanel';
+import WorkspacePanel, { WorkspaceHeaderActions } from './components/WorkspacePanel';
+import TabBar, { renderTabIcon, type CreateMenuEntry } from './components/TabBar';
+import Sidebar, { WORKSPACES_SECTION } from './components/Sidebar';
 import SettingsPanel from './components/SettingsPanel';
 import ConfirmDialog from './components/ConfirmDialog';
-import { ResizeHandle, type DragInfo } from './components/ResizeHandle';
-import type { HostApi, MainContentContext, Tab } from './types';
+import { SettingsIcon, SidebarIcon } from './components/icons';
+import type { HostApi, MainContentContext, SidebarPanel, Tab } from './types';
 import { shouldResetWorkspaceTabs } from './workspaceSelection';
 import { worktreeDeleteUrl, worktreeStatusUrl, probeIsDirty } from './worktreeDelete';
 import { initClientTelemetry, track } from './telemetryClient';
 import { MOBILE_MAX_WIDTH } from './breakpoints';
 import {
-  resolveWorkspacePanelState,
-  updateWorkspacePanelState,
-  type WorkspacePanelStates,
+  mergeTabOrder,
+  neighbourAfterRemoval,
+  parseTabOrders,
+  placeBySavedOrder,
+  type TabOrders,
 } from './workspacePanelState';
-import type {
-  WorkspacesPanelMode,
-  FilesPanelMode,
-  BrowserPanelMode,
-  BrowserInspectorPosition,
-} from '../lib/settings';
+import type { WorkspacesPanelMode, BrowserInspectorPosition } from '../lib/settings';
 
-export type { HostApi, Tab, PluginIntegration, MainContentContext } from './types';
+export type {
+  HostApi,
+  Tab,
+  PluginIntegration,
+  MainContentContext,
+  SidebarPanel,
+} from './types';
 export { composeIntegrations } from './types';
 export type {
   WorkspacesPanelMode,
@@ -67,14 +70,17 @@ export interface HomeState {
   activePath: string | null;
   activeTabId: string | null;
   tabs: Tab[];
+  /** Replace/update the tab list. Tabs that newly appear and have a saved
+   *  position for this workspace are slotted back into it (see
+   *  `placeBySavedOrder`), so integrations can restore asynchronously in any
+   *  order without fighting the user's arrangement. */
   setTabs: React.Dispatch<React.SetStateAction<Tab[]>>;
   setActiveTabId: React.Dispatch<React.SetStateAction<string | null>>;
   hostApi: HostApi;
   isMobile: boolean;
-  filesPanelOpen: boolean;
-  browserPanelOpen: boolean;
-  setBrowserPanelOpen: React.Dispatch<React.SetStateAction<boolean>>;
   settingsHydrated: boolean;
+  /** Placement of the DevTools inspector inside browser tabs. */
+  browserInspectorPosition: BrowserInspectorPosition;
   refreshWorkspaces: () => Promise<void>;
 
   // Host-internal (consumed by Home itself; integrations should ignore)
@@ -84,12 +90,9 @@ export interface HomeState {
   workspacesOpen: boolean;
   workspacesPanelMode: WorkspacesPanelMode;
   workspacesPanelDockedOpen: boolean;
-  filesPanelMode: FilesPanelMode;
-  browserPanelMode: BrowserPanelMode;
-  browserInspectorPosition: BrowserInspectorPosition;
+  /** Selected left-sidebar section ("workspaces" or a plugin panel id). */
+  sidebarSection: string;
   workspaceFilterActiveOnly: boolean;
-  filesPanelMounted: boolean;
-  filesPanelWidth: number;
   workspacesWidth: number;
   settingsOpen: boolean;
   settingsPanelWidth: number;
@@ -100,13 +103,9 @@ export interface HomeState {
   setWorkspacesOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setWorkspacesPanelMode: React.Dispatch<React.SetStateAction<WorkspacesPanelMode>>;
   setWorkspacesPanelDockedOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  setFilesPanelMode: React.Dispatch<React.SetStateAction<FilesPanelMode>>;
-  setBrowserPanelMode: React.Dispatch<React.SetStateAction<BrowserPanelMode>>;
+  setSidebarSection: React.Dispatch<React.SetStateAction<string>>;
   setBrowserInspectorPosition: React.Dispatch<React.SetStateAction<BrowserInspectorPosition>>;
   setWorkspaceFilterActiveOnly: React.Dispatch<React.SetStateAction<boolean>>;
-  setFilesPanelOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  setFilesPanelMounted: React.Dispatch<React.SetStateAction<boolean>>;
-  setFilesPanelWidth: React.Dispatch<React.SetStateAction<number>>;
   setWorkspacesWidth: React.Dispatch<React.SetStateAction<number>>;
   setSettingsOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSettingsPanelWidth: React.Dispatch<React.SetStateAction<number>>;
@@ -150,20 +149,16 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
   const [worktreesByRepo, setWorktreesByRepo] = useState<Record<string, WorktreeInfo[]>>({});
   const [activePath, setActivePath] = useState<string | null>(null);
   const [activeWorktree, setActiveWorktree] = useState<WorktreeInfo | null>(null);
-  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [tabs, setTabsRaw] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [workspacesOpen, setWorkspacesOpen] = useState(false);
   const [workspacesPanelMode, setWorkspacesPanelMode] = useState<WorkspacesPanelMode>('docked');
   const [workspacesPanelDockedOpen, setWorkspacesPanelDockedOpen] = useState(true);
-  const [filesPanelMode, setFilesPanelMode] = useState<FilesPanelMode>('docked');
-  const [browserPanelMode, setBrowserPanelMode] = useState<BrowserPanelMode>('docked');
+  const [sidebarSection, setSidebarSection] = useState<string>(WORKSPACES_SECTION);
   const [browserInspectorPosition, setBrowserInspectorPosition] =
     useState<BrowserInspectorPosition>('hidden');
   const [workspaceFilterActiveOnly, setWorkspaceFilterActiveOnly] = useState(false);
-  const [workspacePanelStates, setWorkspacePanelStates] = useState<WorkspacePanelStates>({});
-  const [filesPanelMounted, setFilesPanelMounted] = useState(false);
-  const [filesPanelWidth, setFilesPanelWidth] = useState(900);
   const [workspacesWidth, setWorkspacesWidth] = useState(280);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPanelWidth, setSettingsPanelWidth] = useState(420);
@@ -186,25 +181,47 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     return () => window.removeEventListener('resize', check);
   }, []);
 
-  const { browserOpen: browserPanelOpen, filesOpen: filesPanelOpen } = useMemo(
-    () => resolveWorkspacePanelState(workspacePanelStates, activePath, isMobile),
-    [workspacePanelStates, activePath, isMobile],
-  );
-  const setBrowserPanelOpen = useCallback<React.Dispatch<React.SetStateAction<boolean>>>(
-    (update) => {
-      setWorkspacePanelStates((states) =>
-        updateWorkspacePanelState(states, activePath, 'browserOpen', update, isMobile),
-      );
+  // ----- per-workspace tab order -----
+  // `tabOrderRef[path]` is the saved left-to-right id order (including ids of
+  // tabs not restored yet). Read synchronously by the tab setters below, so it
+  // lives in a ref; persisted by the effect further down.
+  const activePathRef = useRef(activePath);
+  activePathRef.current = activePath;
+  const tabOrderRef = useRef<TabOrders>({});
+  const persistedTabOrderRef = useRef<TabOrders>({});
+
+  const setTabs = useCallback<React.Dispatch<React.SetStateAction<Tab[]>>>((update) => {
+    setTabsRaw((prev) => {
+      const next = typeof update === 'function' ? update(prev) : update;
+      if (next === prev) return prev;
+      const path = activePathRef.current;
+      return path ? placeBySavedOrder(prev, next, tabOrderRef.current[path]) : next;
+    });
+  }, []);
+
+  /** Forget a closed tab's slot so reopening something with the same id
+   *  doesn't jump back to where the old one was. */
+  const forgetTabPosition = useCallback((id: string) => {
+    const path = activePathRef.current;
+    const saved = path ? tabOrderRef.current[path] : undefined;
+    if (!path || !saved?.includes(id)) return;
+    tabOrderRef.current = { ...tabOrderRef.current, [path]: saved.filter((x) => x !== id) };
+  }, []);
+
+  /** Drop a tab; if it was active, activate its right neighbour, else left. */
+  const removeTabInternal = useCallback(
+    (id: string) => {
+      setTabsRaw((prev) => {
+        // Unknown id → silent no-op (integrations call this speculatively), and
+        // its saved slot is kept: it may be a tab that is about to be restored.
+        if (!prev.some((t) => t.id === id)) return prev;
+        forgetTabPosition(id);
+        const neighbour = neighbourAfterRemoval(prev, id);
+        setActiveTabId((cur) => (cur === id ? neighbour : cur));
+        return prev.filter((t) => t.id !== id);
+      });
     },
-    [activePath, isMobile],
-  );
-  const setFilesPanelOpen = useCallback<React.Dispatch<React.SetStateAction<boolean>>>(
-    (update) => {
-      setWorkspacePanelStates((states) =>
-        updateWorkspacePanelState(states, activePath, 'filesOpen', update, isMobile),
-      );
-    },
-    [activePath, isMobile],
+    [forgetTabPosition],
   );
   const fetchRepos = useCallback(async () => {
     const res = await fetch('/api/repos');
@@ -250,8 +267,13 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
       .then((data) => {
         if (data.activePath) setActivePath(data.activePath);
         if (data.activeTabId) setActiveTabId(data.activeTabId);
-        if (data.workspacePanelState && typeof data.workspacePanelState === 'object') {
-          setWorkspacePanelStates(data.workspacePanelState);
+        // Legacy `workspacePanelState` / `filesPanelMode` / `browserPanelMode`
+        // (side-panel era) are deliberately ignored.
+        const orders = parseTabOrders(data.tabOrder);
+        tabOrderRef.current = orders;
+        persistedTabOrderRef.current = orders;
+        if (typeof data.sidebarSection === 'string' && data.sidebarSection) {
+          setSidebarSection(data.sidebarSection);
         }
         if (data.workspacesPanelMode === 'overlay' || data.workspacesPanelMode === 'docked') {
           setWorkspacesPanelMode(data.workspacesPanelMode);
@@ -261,12 +283,6 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
         }
         if (typeof data.workspaceFilterActiveOnly === 'boolean') {
           setWorkspaceFilterActiveOnly(data.workspaceFilterActiveOnly);
-        }
-        if (data.filesPanelMode === 'overlay' || data.filesPanelMode === 'docked') {
-          setFilesPanelMode(data.filesPanelMode);
-        }
-        if (data.browserPanelMode === 'overlay' || data.browserPanelMode === 'docked') {
-          setBrowserPanelMode(data.browserPanelMode);
         }
         if (
           data.browserInspectorPosition === 'hidden' ||
@@ -295,12 +311,10 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
       body: JSON.stringify({
         activePath,
         activeTabId,
-        workspacePanelState: workspacePanelStates,
         workspacesPanelMode,
         workspacesPanelDockedOpen,
         workspaceFilterActiveOnly,
-        filesPanelMode,
-        browserPanelMode,
+        sidebarSection,
         browserInspectorPosition,
       }),
     });
@@ -308,23 +322,89 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     settingsHydrated,
     activePath,
     activeTabId,
-    workspacePanelStates,
     workspacesPanelMode,
     workspacesPanelDockedOpen,
     workspaceFilterActiveOnly,
-    filesPanelMode,
-    browserPanelMode,
+    sidebarSection,
     browserInspectorPosition,
   ]);
+
+  // Persist the active workspace's tab order whenever the strip changes
+  // (open / close / reorder). Merging with the saved order keeps the slots of
+  // tabs that haven't been restored yet, so a half-restored strip right after
+  // a switch or reload never truncates it.
+  useEffect(() => {
+    if (!settingsHydrated || !activePath) return;
+    const merged = mergeTabOrder(
+      tabs.map((t) => t.id),
+      tabOrderRef.current[activePath] ?? [],
+    );
+    tabOrderRef.current = { ...tabOrderRef.current, [activePath]: merged };
+    const persisted = persistedTabOrderRef.current[activePath] ?? [];
+    if (persisted.length === merged.length && persisted.every((id, i) => id === merged[i])) return;
+    persistedTabOrderRef.current = { ...persistedTabOrderRef.current, [activePath]: merged };
+    const path = activePath;
+    fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tabOrder: { [path]: merged } }),
+    })
+      .then((res) => {
+        // Forget a failed write so the next change retries it.
+        if (!res.ok && persistedTabOrderRef.current[path] === merged)
+          delete persistedTabOrderRef.current[path];
+      })
+      .catch(() => {
+        if (persistedTabOrderRef.current[path] === merged) delete persistedTabOrderRef.current[path];
+      });
+  }, [settingsHydrated, activePath, tabs]);
 
   const hostApi: HostApi = useMemo(
     () => ({
       openTab(tab, options) {
-        setTabs((prev) => (prev.some((t) => t.id === tab.id) ? prev : [...prev, tab]));
+        const after = options?.after;
+        setTabsRaw((prev) => {
+          if (prev.some((t) => t.id === tab.id)) return prev;
+          const afterIndex = after ? prev.findIndex((t) => t.id === after) : -1;
+          if (afterIndex !== -1) {
+            // Explicit placement wins over the saved order.
+            const next = [...prev];
+            next.splice(afterIndex + 1, 0, tab);
+            return next;
+          }
+          const next = [...prev, tab];
+          const path = activePathRef.current;
+          return path ? placeBySavedOrder(prev, next, tabOrderRef.current[path]) : next;
+        });
         if (options?.activate !== false) setActiveTabId(tab.id);
       },
+      updateTab(id, patch) {
+        setTabsRaw((prev) => {
+          const i = prev.findIndex((t) => t.id === id);
+          if (i === -1) return prev;
+          const cur = prev[i];
+          const changed = (Object.keys(patch) as Array<keyof typeof patch>).some(
+            (k) => cur[k] !== patch[k],
+          );
+          if (!changed) return prev;
+          const next = [...prev];
+          next[i] = { ...cur, ...patch, id: cur.id, type: cur.type };
+          return next;
+        });
+      },
+      removeTab(id) {
+        removeTabInternal(id);
+      },
+      activateTab(id) {
+        // Checked inside an updater so an openTab queued in the same tick
+        // counts as present. Returning `prev` makes this a no-op render-wise.
+        setTabsRaw((prev) => {
+          if (prev.some((t) => t.id === id)) setActiveTabId(id);
+          return prev;
+        });
+      },
     }),
-    [],
+    [removeTabInternal],
   );
 
   const handleSelectWorktree = useCallback(
@@ -512,9 +592,6 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     setActiveTabId,
     hostApi,
     isMobile,
-    filesPanelOpen,
-    browserPanelOpen,
-    setBrowserPanelOpen,
     settingsHydrated,
     refreshWorkspaces,
     repos,
@@ -523,12 +600,9 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     workspacesOpen,
     workspacesPanelMode,
     workspacesPanelDockedOpen,
-    filesPanelMode,
-    browserPanelMode,
+    sidebarSection,
     browserInspectorPosition,
     workspaceFilterActiveOnly,
-    filesPanelMounted,
-    filesPanelWidth,
     workspacesWidth,
     settingsOpen,
     settingsPanelWidth,
@@ -539,13 +613,9 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     setWorkspacesOpen,
     setWorkspacesPanelMode,
     setWorkspacesPanelDockedOpen,
-    setFilesPanelMode,
-    setBrowserPanelMode,
+    setSidebarSection,
     setBrowserInspectorPosition,
     setWorkspaceFilterActiveOnly,
-    setFilesPanelOpen,
-    setFilesPanelMounted,
-    setFilesPanelWidth,
     setWorkspacesWidth,
     setSettingsOpen,
     setSettingsPanelWidth,
@@ -567,78 +637,15 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
   };
 }
 
+
 // =========================================================================
 // Home — pure renderer. State must be threaded in via the `state` prop.
 // =========================================================================
 
-const HamburgerIcon = () => (
-  <svg
-    width="18"
-    height="18"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <line x1="3" y1="12" x2="21" y2="12" />
-    <line x1="3" y1="6" x2="21" y2="6" />
-    <line x1="3" y1="18" x2="21" y2="18" />
-  </svg>
-);
-
-const FilesIcon = () => (
-  <svg
-    width="18"
-    height="18"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-  </svg>
-);
-
-const SettingsIcon = () => (
-  <svg
-    width="18"
-    height="18"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <circle cx="12" cy="12" r="3" />
-    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-  </svg>
-);
-
-const BrowserIcon = () => (
-  <svg
-    width="18"
-    height="18"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <circle cx="12" cy="12" r="10" />
-    <line x1="2" y1="12" x2="22" y2="12" />
-    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-  </svg>
-);
-
 const EMPTY_PATH_SET: ReadonlySet<string> = new Set();
 const EMPTY_TAB_ID_SET: ReadonlySet<string> = new Set();
 const EMPTY_ORPHANS: Record<string, { name: string; created: string }[]> = {};
+const EMPTY_PANELS: ReadonlyArray<SidebarPanel> = [];
 
 export interface HomeProps {
   /** Required: the host state instance, obtained from `useHomeState()`. */
@@ -650,15 +657,24 @@ export interface HomeProps {
   mainContent?: (ctx: MainContentContext) => ReactNode;
   /** Render slot for the iframe overlay. */
   iframeTabsLayer?: (state: { activeTabId: string | null }) => ReactNode;
-  /** File-panel right-click menu entries. */
+  /** @deprecated The file tree is an integration-owned sidebar panel now; the
+   *  files integration consumes these. Accepted (and ignored) so a spread of
+   *  `composeIntegrations(...)` still type-checks. */
   fileHandlers?: ReadonlyArray<{
     pattern: string;
     label: string;
     onSelect: (absPath: string, api: HostApi) => void | Promise<void>;
   }>;
+  /** @deprecated See `fileHandlers`. */
   fileIndicatorPaths?: ReadonlySet<string>;
   ephemeralTabTypes?: ReadonlySet<string>;
   onCloseTab?: (tab: Tab) => void;
+  /** Composed veto for user-initiated closes (resolve `false` to keep the tab). */
+  beforeCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
+  /** Composed per-tab icon (null → the host's per-type default). */
+  tabIcon?: (tab: Tab) => ReactNode | null;
+  /** Integration-contributed left-sidebar sections, after Workspaces. */
+  sidebarPanels?: ReadonlyArray<SidebarPanel>;
   /** Plugin-contributed tab types for the [+] dropdown. */
   tabTypeChoices?: ReadonlyArray<{
     type: string;
@@ -678,10 +694,10 @@ export default function Home(props: HomeProps) {
     state: host,
     mainContent,
     iframeTabsLayer,
-    fileHandlers,
-    fileIndicatorPaths,
-    ephemeralTabTypes: _ephemeralTabTypes,
     onCloseTab,
+    beforeCloseTab,
+    tabIcon,
+    sidebarPanels,
     tabTypeChoices,
     alertedPaths,
     alertedTabIds,
@@ -689,72 +705,29 @@ export default function Home(props: HomeProps) {
     workspaceReady,
   } = props;
 
-  const indicatorPaths = fileIndicatorPaths ?? EMPTY_PATH_SET;
-  // FilePanel wants a mutable Set; the prop is ReadonlySet. Memoized so the
-  // reference stays stable when indicatorPaths is unchanged — avoids spurious
-  // FilePanel re-renders if it ever adopts React.memo.
-  const fileIndicatorPathsSet = useMemo<Set<string>>(
-    () =>
-      indicatorPaths instanceof Set ? (indicatorPaths as Set<string>) : new Set(indicatorPaths),
-    [indicatorPaths],
-  );
   const effectiveAlertedPaths = alertedPaths ?? EMPTY_PATH_SET;
   const effectiveAlertedTabIds = alertedTabIds ?? EMPTY_TAB_ID_SET;
   const effectiveOrphans = workspaceOrphans ?? EMPTY_ORPHANS;
-
-  const fileHandlersRef = useRef(fileHandlers);
-  fileHandlersRef.current = fileHandlers;
-
-  const workspacesOverlayRef = useRef<HTMLDivElement>(null);
-  const workspacesDockedRef = useRef<HTMLDivElement>(null);
-  const setWorkspacesWidth = host.setWorkspacesWidth;
-  const handleWorkspacesOverlayDrag = useCallback(
-    ({ x }: DragInfo) => {
-      const overlay = workspacesOverlayRef.current;
-      if (!overlay) return;
-      const left = overlay.getBoundingClientRect().left;
-      const max = window.innerWidth - left - 200;
-      setWorkspacesWidth(Math.min(max, Math.max(200, x - left)));
-    },
-    [setWorkspacesWidth],
-  );
-  const handleWorkspacesDockedDrag = useCallback(
-    ({ x }: DragInfo) => {
-      const docked = workspacesDockedRef.current;
-      if (!docked) return;
-      const left = docked.getBoundingClientRect().left;
-      const max = window.innerWidth - left - 200;
-      setWorkspacesWidth(Math.min(max, Math.max(200, x - left)));
-    },
-    [setWorkspacesWidth],
-  );
+  const panels = sidebarPanels ?? EMPTY_PANELS;
 
   // Narrow viewports always use overlay regardless of the user's preference.
-  const effectiveWorkspacesMode: WorkspacesPanelMode = host.isMobile
+  const effectiveSidebarMode: WorkspacesPanelMode = host.isMobile
     ? 'overlay'
     : host.workspacesPanelMode;
-  const isDocked = effectiveWorkspacesMode === 'docked';
-  const effectiveFilesMode: FilesPanelMode = host.isMobile ? 'overlay' : host.filesPanelMode;
-  const isFilesDocked = effectiveFilesMode === 'docked';
-  const filesPanelVisible = host.filesPanelOpen;
+  const isDocked = effectiveSidebarMode === 'docked';
+  const sidebarVisible = isDocked ? host.workspacesPanelDockedOpen : host.workspacesOpen;
 
-  const wrappedFileHandlers = useMemo(() => {
-    if (!fileHandlers || fileHandlers.length === 0) return undefined;
-    return fileHandlers.map((h) => ({
-      pattern: h.pattern,
-      label: h.label,
-      onSelect: (absPath: string) => h.onSelect(absPath, host.hostApi),
-    }));
-  }, [fileHandlers, host.hostApi]);
-
-  const createMenu = useMemo(() => {
+  // [+] entries need a workspace: every tab is scoped to one.
+  const createMenu = useMemo<CreateMenuEntry[]>(() => {
+    if (!host.activePath) return [];
     return (tabTypeChoices ?? []).map((c) => ({
+      type: c.type,
       label: c.label,
       onSelect: () => {
         void c.onCreate(host.hostApi);
       },
     }));
-  }, [tabTypeChoices, host.hostApi]);
+  }, [tabTypeChoices, host.hostApi, host.activePath]);
 
   // One landing attempt per workspace activation; stays consumed after user closes tabs.
   const landingAttemptRef = useRef<{ path: string | null; consumed: boolean }>({
@@ -783,7 +756,9 @@ export default function Home(props: HomeProps) {
     if (host.tabs.length > 0) return;
 
     const silentApi: HostApi = {
-      openTab: (tab) => host.hostApi.openTab(tab, { activate: false }),
+      ...host.hostApi,
+      openTab: (tab, options) => host.hostApi.openTab(tab, { ...options, activate: false }),
+      activateTab: () => {},
     };
 
     (async () => {
@@ -824,67 +799,76 @@ export default function Home(props: HomeProps) {
     landingChoices,
   ]);
 
+  // User-initiated close: ask the owning integration first (e.g. an unsaved
+  // file prompt), then notify, then drop the tab and focus its neighbour.
+  const closingRef = useRef<Set<string>>(new Set());
+  const tabsRef = useRef(host.tabs);
+  tabsRef.current = host.tabs;
   const handleCloseTab = useCallback(
-    (tabId: string) => {
-      const tab = host.tabs.find((t) => t.id === tabId);
-      if (!tab) return;
-      onCloseTab?.(tab);
-      track('tab_closed', { type: tab.type });
-      host.setTabs((prev) => {
-        const next = prev.filter((t) => t.id !== tabId);
-        if (tabId === host.activeTabId) {
-          host.setActiveTabId(next.length > 0 ? next[0].id : null);
+    async (tabId: string) => {
+      const tab = tabsRef.current.find((t) => t.id === tabId);
+      if (!tab || closingRef.current.has(tabId)) return;
+      closingRef.current.add(tabId);
+      try {
+        if (beforeCloseTab) {
+          let allowed: boolean;
+          try {
+            allowed = (await beforeCloseTab(tab)) !== false;
+          } catch (err) {
+            // A throwing guard keeps the tab: losing unsaved work is worse.
+            console.warn(
+              '[home] beforeCloseTab failed; keeping the tab:',
+              err instanceof Error ? err.message : String(err),
+            );
+            allowed = false;
+          }
+          if (!allowed) return;
         }
-        return next;
-      });
+        // The tab may have gone away while the guard was prompting.
+        const current = tabsRef.current.find((t) => t.id === tabId) ?? tab;
+        onCloseTab?.(current);
+        track('tab_closed', { type: current.type });
+        host.hostApi.removeTab(tabId);
+      } finally {
+        closingRef.current.delete(tabId);
+      }
     },
-    [host, onCloseTab],
+    [host.hostApi, beforeCloseTab, onCloseTab],
+  );
+
+  const handleCloseSidebar = useCallback(() => {
+    if (isDocked) host.setWorkspacesPanelDockedOpen(false);
+    else host.setWorkspacesOpen(false);
+  }, [host, isDocked]);
+
+  const handleToggleSidebar = useCallback(() => {
+    if (isDocked) host.setWorkspacesPanelDockedOpen((prev) => !prev);
+    else host.setWorkspacesOpen((v) => !v);
+    track('panel_toggled', { panel: 'workspaces' });
+  }, [host, isDocked]);
+
+  const openSidebarOn = useCallback(
+    (section: string) => {
+      host.setSidebarSection(section);
+      if (isDocked) host.setWorkspacesPanelDockedOpen(true);
+      else host.setWorkspacesOpen(true);
+    },
+    [host, isDocked],
   );
 
   const handleSelectWorktreeAndClose = useCallback(
     (wt: WorktreeInfo) => {
       host.handleSelectWorktree(wt);
-      // Docked mode keeps the panel pinned — selecting a worktree shouldn't hide it.
+      // Docked mode keeps the sidebar pinned — selecting a worktree shouldn't hide it.
       if (!isDocked) host.setWorkspacesOpen(false);
     },
     [host, isDocked],
   );
 
-  const handleToggleWorkspaces = useCallback(() => {
-    if (isDocked) {
-      host.setWorkspacesPanelDockedOpen((prev) => !prev);
-    } else {
-      host.setWorkspacesOpen((v) => !v);
-    }
-    track('panel_toggled', { panel: 'workspaces' });
-  }, [host, isDocked]);
-
-  const handleCollapseWorkspaces = useCallback(() => {
-    if (isDocked) {
-      host.setWorkspacesPanelDockedOpen(false);
-    } else {
-      host.setWorkspacesOpen(false);
-    }
-  }, [host, isDocked]);
-
-  const handleToggleFiles = useCallback(() => {
-    host.setFilesPanelOpen((prev) => !prev);
-    if (!host.filesPanelMounted) host.setFilesPanelMounted(true);
-    track('panel_toggled', { panel: 'files' });
-  }, [host]);
-
-  const handleToggleBrowsers = useCallback(() => {
-    host.setBrowserPanelOpen((prev) => !prev);
-    track('panel_toggled', { panel: 'browser' });
-  }, [host]);
-
-  // When the user switches display mode while a panel is currently visible,
-  // carry the visibility state across so the panel does not silently disappear.
-  // The two modes use independent visibility flags (workspacesOpen for overlay,
-  // workspacesPanelDockedOpen for docked); without this sync, switching from
-  // docked-open to overlay would leave both flags inconsistent and the panel
-  // hidden until the user toggles it manually.
-  const handleWorkspacesPanelModeChange = useCallback(
+  // When the user switches display mode while the sidebar is visible, carry
+  // the visibility across: the two modes use independent flags
+  // (workspacesOpen for overlay, workspacesPanelDockedOpen for docked).
+  const handleSidebarModeChange = useCallback(
     (newMode: WorkspacesPanelMode) => {
       if (newMode === 'overlay' && host.workspacesPanelDockedOpen) {
         host.setWorkspacesOpen(true);
@@ -896,11 +880,12 @@ export default function Home(props: HomeProps) {
     [host],
   );
 
-  const handleFilesPanelModeChange = useCallback(
-    (newMode: FilesPanelMode) => {
-      host.setFilesPanelMode(newMode);
-    },
-    [host],
+  const alertedPathSet = useMemo(
+    () =>
+      effectiveAlertedPaths instanceof Set
+        ? (effectiveAlertedPaths as Set<string>)
+        : new Set(effectiveAlertedPaths),
+    [effectiveAlertedPaths],
   );
 
   const workspacePanelElement = (
@@ -910,11 +895,7 @@ export default function Home(props: HomeProps) {
       orphanSessions={effectiveOrphans}
       activeWorktreeId={host.activeWorktree?.id || null}
       activePath={host.activePath}
-      alertedPaths={
-        effectiveAlertedPaths instanceof Set
-          ? (effectiveAlertedPaths as Set<string>)
-          : new Set(effectiveAlertedPaths)
-      }
+      alertedPaths={alertedPathSet}
       activeOnly={host.workspaceFilterActiveOnly}
       onSelectWorktree={handleSelectWorktreeAndClose}
       onCreateWorktree={host.handleCreateWorktree}
@@ -926,12 +907,18 @@ export default function Home(props: HomeProps) {
       onRemoveDir={host.handleRemoveDir}
       onSelectDirectory={host.handleSelectDirectory}
       onToggleActiveOnly={() => host.setWorkspaceFilterActiveOnly((prev) => !prev)}
-      onRefresh={host.refreshWorkspaces}
+    />
+  );
+
+  const workspacesActions = (
+    <WorkspaceHeaderActions
+      activeOnly={host.workspaceFilterActiveOnly}
+      onToggleActiveOnly={() => host.setWorkspaceFilterActiveOnly((prev) => !prev)}
+      onRefresh={() => void host.refreshWorkspaces()}
       onGoHome={() => {
         host.handleSelectWorktree(null);
-        handleCollapseWorkspaces();
+        if (!isDocked) host.setWorkspacesOpen(false);
       }}
-      onCollapse={handleCollapseWorkspaces}
     />
   );
 
@@ -945,101 +932,109 @@ export default function Home(props: HomeProps) {
     return workspacePaths.some((wp) => wp !== host.activePath && effectiveAlertedPaths.has(wp));
   }, [effectiveAlertedPaths, host.worktreesByRepo, effectiveOrphans, host.activePath]);
 
-  // The badge surfaces alerts in workspaces other than the active one, but only
-  // when the panel is hidden — once it's visible (overlay open OR docked-expanded),
-  // the in-panel item highlight already shows where the alert is.
-  const workspacesPanelVisible = isDocked ? host.workspacesPanelDockedOpen : host.workspacesOpen;
+  // The badge surfaces alerts in other workspaces, but only while the sidebar
+  // is hidden — once visible, the in-list highlight already shows where.
   const topBarLeft = (
     <button
-      style={{ ...S.tabBarBtn, position: 'relative' as const }}
-      onClick={handleToggleWorkspaces}
-      title="Workspaces"
+      className="ot-icon-btn"
+      onClick={handleToggleSidebar}
+      title={sidebarVisible ? 'Hide sidebar' : 'Show sidebar'}
+      aria-label={sidebarVisible ? 'Hide sidebar' : 'Show sidebar'}
+      aria-pressed={sidebarVisible}
     >
-      <HamburgerIcon />
-      {hasAlerts && !workspacesPanelVisible && <span style={S.alertBadge} />}
+      <SidebarIcon size={18} />
+      {hasAlerts && !sidebarVisible && <span style={S.alertBadge} />}
     </button>
   );
 
   const topBarRight = (
-    <>
-      <button style={S.tabBarBtn} onClick={() => host.setSettingsOpen(true)} title="Settings">
-        <SettingsIcon />
-      </button>
-      <button
-        style={{
-          ...S.tabBarBtn,
-          opacity: host.activePath ? 1 : 0.3,
-          cursor: host.activePath ? 'pointer' : 'default',
-        }}
-        onClick={host.activePath ? handleToggleBrowsers : undefined}
-        title={
-          host.activePath
-            ? host.browserPanelOpen
-              ? 'Hide browser view'
-              : 'Show browser view'
-            : 'Select a workspace first'
-        }
-      >
-        <BrowserIcon />
-      </button>
-      <button
-        style={{
-          ...S.tabBarBtn,
-          opacity: host.activePath ? 1 : 0.3,
-          cursor: host.activePath ? 'pointer' : 'default',
-        }}
-        onClick={host.activePath ? handleToggleFiles : undefined}
-        title={
-          host.activePath
-            ? filesPanelVisible
-              ? 'Close files'
-              : 'Open files'
-            : 'Select a workspace first'
-        }
-      >
-        <FilesIcon />
-      </button>
-    </>
+    <button
+      className="ot-icon-btn"
+      onClick={() => host.setSettingsOpen(true)}
+      title="Settings"
+      aria-label="Settings"
+    >
+      <SettingsIcon size={18} />
+    </button>
+  );
+
+  const alertedTabIdSet = useMemo(
+    () =>
+      effectiveAlertedTabIds instanceof Set
+        ? (effectiveAlertedTabIds as Set<string>)
+        : new Set(effectiveAlertedTabIds),
+    [effectiveAlertedTabIds],
   );
 
   const activeTab = host.tabs.find((t) => t.id === host.activeTabId) ?? null;
 
+  const emptyState = (() => {
+    if (activeTab || host.tabs.length > 0) return null;
+    // Restoring: integrations will add tabs shortly; don't flash a prompt.
+    if (host.activePath && (workspaceReady === false || !host.settingsHydrated)) return null;
+    if (!host.activePath) {
+      return (
+        <div style={S.empty}>
+          <div style={S.emptyTitle}>No workspace selected</div>
+          <div style={S.emptyHint}>Pick a repository, worktree or directory to work in.</div>
+          <div style={S.emptyActions}>
+            <button className="ot-empty-btn" onClick={() => openSidebarOn(WORKSPACES_SECTION)}>
+              <SidebarIcon size={14} />
+              Choose a workspace
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div style={S.empty}>
+        <div style={S.emptyTitle}>No tabs open</div>
+        {createMenu.length === 0 ? (
+          <div style={S.emptyHint}>No tab type registered.</div>
+        ) : (
+          <div style={S.emptyActions}>
+            {createMenu.map((c) => (
+              <button key={`${c.type}:${c.label}`} className="ot-empty-btn" onClick={c.onSelect}>
+                {renderTabIcon({ type: c.type, id: '', name: c.label }, tabIcon, 14)}
+                New {c.label.toLowerCase()}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  })();
+
   return (
     <div style={S.root}>
-      {isDocked && host.workspacesPanelDockedOpen && (
-        <div
-          ref={workspacesDockedRef}
-          style={{ ...S.workspacesDocked, width: `${host.workspacesWidth}px` }}
-        >
-          {workspacePanelElement}
-          <ResizeHandle
-            axis="x"
-            variant="edge"
-            style={{ right: -3 }}
-            onDrag={handleWorkspacesDockedDrag}
-          />
-        </div>
-      )}
-      <main
-        style={{ ...S.center, display: host.isMobile && host.filesPanelOpen ? 'none' : 'flex' }}
-      >
+      <Sidebar
+        mode={effectiveSidebarMode}
+        open={sidebarVisible}
+        isMobile={host.isMobile}
+        width={host.workspacesWidth}
+        onWidthChange={host.setWorkspacesWidth}
+        onResizeStart={() => host.setIsResizing(true)}
+        onResizeEnd={() => host.setIsResizing(false)}
+        onClose={handleCloseSidebar}
+        section={host.sidebarSection}
+        onSectionChange={host.setSidebarSection}
+        workspaces={workspacePanelElement}
+        workspacesActions={workspacesActions}
+        panels={panels}
+      />
+      <main style={S.center}>
         <TabBar
           tabs={host.tabs}
           activeTabId={host.activeTabId}
-          alertedTabIds={
-            effectiveAlertedTabIds instanceof Set
-              ? (effectiveAlertedTabIds as Set<string>)
-              : new Set(effectiveAlertedTabIds)
-          }
+          alertedTabIds={alertedTabIdSet}
+          compact={host.isMobile}
           leftAction={topBarLeft}
           rightAction={topBarRight}
           onSelect={host.setActiveTabId}
-          onClose={handleCloseTab}
-          onCreate={() => createMenu[0]?.onSelect()}
+          onClose={(id) => void handleCloseTab(id)}
           createMenu={createMenu}
-          onRename={(tabId, name) => {
-            host.setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, name } : t)));
-          }}
+          tabIcon={tabIcon}
+          onRename={(tabId, name) => host.hostApi.updateTab(tabId, { name })}
           onReorder={(from, to) => {
             host.setTabs((prev) => {
               const next = [...prev];
@@ -1049,136 +1044,12 @@ export default function Home(props: HomeProps) {
             });
           }}
         />
-        <div style={{ ...S.terminalContent, position: 'relative' as const }}>
-          {host.isResizing && <div style={{ position: 'absolute', inset: 0, zIndex: 10 }} />}
-          {(() => {
-            if (!activeTab) {
-              return (
-                <div style={S.noTerminal}>
-                  {host.activePath
-                    ? createMenu.length > 0
-                      ? `Click "+" to open ${createMenu.length === 1 ? `a new ${createMenu[0].label.toLowerCase()}` : 'a new tab'}`
-                      : 'No tab type registered'
-                    : 'Select a workspace from the ☰ menu'}
-                </div>
-              );
-            }
-            return mainContent?.({ activeTab, browserPanelOpen: host.browserPanelOpen }) ?? null;
-          })()}
+        <div style={S.content}>
+          {host.isResizing && <div style={S.resizeShield} />}
+          {activeTab ? mainContent?.({ activeTab, browserPanelOpen: false }) ?? null : emptyState}
           {iframeTabsLayer?.({ activeTabId: host.activeTabId })}
         </div>
       </main>
-
-      {host.isMobile && host.filesPanelOpen && (
-        <div style={S.center}>
-          {host.activePath ? (
-            <FilePanel
-              dirPath={host.activePath}
-              width={0}
-              isMobile
-              onClose={() => host.setFilesPanelOpen(false)}
-              onWidthChange={() => {}}
-              fileHandlers={wrappedFileHandlers}
-              fileIndicatorPaths={fileIndicatorPathsSet}
-            />
-          ) : (
-            <div style={S.noTerminal}>Select a directory or worktree</div>
-          )}
-        </div>
-      )}
-
-      {!host.isMobile &&
-        !isFilesDocked &&
-        (host.filesPanelMounted || host.filesPanelOpen) && (
-        <div style={{ ...S.overlayRight, display: host.filesPanelOpen ? undefined : 'none' }}>
-          {host.activePath ? (
-            <FilePanel
-              dirPath={host.activePath}
-              width={host.filesPanelWidth}
-              onClose={() => host.setFilesPanelOpen(false)}
-              onWidthChange={host.setFilesPanelWidth}
-              onResizeStart={() => host.setIsResizing(true)}
-              onResizeEnd={() => host.setIsResizing(false)}
-              fileHandlers={wrappedFileHandlers}
-              fileIndicatorPaths={fileIndicatorPathsSet}
-            />
-          ) : (
-            <div
-              style={{
-                width: host.filesPanelWidth,
-                background: 'var(--bg-secondary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: 'var(--text-muted)',
-                fontSize: '12px',
-                height: '100%',
-              }}
-            >
-              Select a directory or worktree
-            </div>
-          )}
-        </div>
-      )}
-
-      {!host.isMobile &&
-        isFilesDocked &&
-        host.filesPanelOpen &&
-        (host.activePath ? (
-          <FilePanel
-            dirPath={host.activePath}
-            width={host.filesPanelWidth}
-            onClose={() => host.setFilesPanelOpen(false)}
-            onWidthChange={host.setFilesPanelWidth}
-            onResizeStart={() => host.setIsResizing(true)}
-            onResizeEnd={() => host.setIsResizing(false)}
-            fileHandlers={wrappedFileHandlers}
-            fileIndicatorPaths={fileIndicatorPathsSet}
-          />
-        ) : (
-          // Mirror the overlay placeholder so the docked panel does not
-          // silently disappear when the active workspace is cleared.
-          <div
-            style={{
-              width: host.filesPanelWidth,
-              background: 'var(--bg-secondary)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'var(--text-muted)',
-              fontSize: '12px',
-              height: '100%',
-              borderLeft: '1px solid var(--border)',
-              flexShrink: 0,
-            }}
-          >
-            Select a directory or worktree
-          </div>
-        ))}
-
-      {!isDocked && host.workspacesOpen && (
-        <>
-          <div style={S.backdrop} onClick={() => host.setWorkspacesOpen(false)} />
-          <div
-            ref={workspacesOverlayRef}
-            style={
-              host.isMobile
-                ? S.workspacesOverlayMobile
-                : { ...S.workspacesOverlay, width: `${host.workspacesWidth}px` }
-            }
-          >
-            {workspacePanelElement}
-            {!host.isMobile && (
-              <ResizeHandle
-                axis="x"
-                variant="edge"
-                style={{ right: -3 }}
-                onDrag={handleWorkspacesOverlayDrag}
-              />
-            )}
-          </div>
-        </>
-      )}
 
       {host.pendingDeleteRepo && (
         <ConfirmDialog
@@ -1229,11 +1100,7 @@ export default function Home(props: HomeProps) {
             onResizeStart={() => host.setIsResizing(true)}
             onResizeEnd={() => host.setIsResizing(false)}
             workspacesPanelMode={host.workspacesPanelMode}
-            onWorkspacesPanelModeChange={handleWorkspacesPanelModeChange}
-            filesPanelMode={host.filesPanelMode}
-            onFilesPanelModeChange={handleFilesPanelModeChange}
-            browserPanelMode={host.browserPanelMode}
-            onBrowserPanelModeChange={host.setBrowserPanelMode}
+            onWorkspacesPanelModeChange={handleSidebarModeChange}
             browserInspectorPosition={host.browserInspectorPosition}
             onBrowserInspectorPositionChange={host.setBrowserInspectorPosition}
           />
@@ -1258,81 +1125,52 @@ const S: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     minWidth: 0,
   },
-  terminalContent: {
+  content: {
+    position: 'relative',
     flex: 1,
     display: 'flex',
     overflow: 'hidden',
+    minHeight: 0,
   },
-  noTerminal: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+  resizeShield: {
+    position: 'absolute',
+    inset: 0,
+    zIndex: 10,
+  },
+  empty: {
     flex: 1,
-    width: '100%',
-    height: '100%',
-    color: 'var(--text-muted)',
-    fontSize: '14px',
-  },
-  tabBarBtn: {
     display: 'flex',
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    width: '36px',
-    height: '36px',
+    gap: '8px',
+    padding: '24px 16px',
+    textAlign: 'center',
+  },
+  emptyTitle: {
+    fontSize: '13px',
+    color: 'var(--text)',
+  },
+  emptyHint: {
+    fontSize: '12px',
     color: 'var(--text-muted)',
-    cursor: 'pointer',
-    border: 'none',
-    background: 'none',
-    flexShrink: 0,
-    padding: 0,
   },
-  backdrop: {
-    position: 'fixed',
-    inset: 0,
-    background: 'rgba(0,0,0,0.4)',
-    zIndex: 50,
-  },
-  workspacesOverlay: {
-    position: 'fixed',
-    top: 0,
-    left: 0,
-    bottom: 0,
-    width: '280px',
-    zIndex: 51,
-    boxShadow: '4px 0 16px rgba(0,0,0,0.5)',
-  },
-  workspacesDocked: {
-    position: 'relative',
-    flexShrink: 0,
-    height: '100%',
-    borderRight: '1px solid var(--border)',
-    background: 'var(--bg)',
-  },
-  workspacesOverlayMobile: {
-    position: 'fixed',
-    inset: 0,
-    zIndex: 51,
-    background: 'var(--bg)',
+  emptyActions: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: '8px',
+    marginTop: '8px',
   },
   alertBadge: {
     position: 'absolute',
-    top: '6px',
-    right: '6px',
+    top: '7px',
+    right: '7px',
     width: '7px',
     height: '7px',
     borderRadius: '50%',
-    background: 'var(--warning, #d29922)',
+    background: 'var(--warning)',
   },
-  overlayRight: {
-    position: 'fixed',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 50,
-    boxShadow: '-4px 0 16px rgba(0,0,0,0.5)',
-  },
-  // Settings sits above the files overlay (zIndex 50) so it stays usable
-  // even when the files panel is open behind it.
   settingsOverlayRight: {
     position: 'fixed',
     top: 0,

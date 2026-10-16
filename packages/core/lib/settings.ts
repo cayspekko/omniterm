@@ -61,29 +61,42 @@ export interface Settings {
    */
   workspaceFilterActiveOnly: boolean;
   /**
-   * Display mode for the right files panel on wide viewports.
-   * "docked" pins it as a permanent right sidebar (auto-narrows to
-   * tree-only when no file tabs are open); "overlay" floats it over
-   * the terminal area. Narrow viewports (< 768px) always overlay.
+   * @deprecated The right-hand files panel is gone (files open as tabs and the
+   * tree lives in the left sidebar). Still accepted so old settings parse.
    */
-  filesPanelMode: FilesPanelMode;
+  filesPanelMode?: FilesPanelMode;
   /**
-   * Display mode for the browser view on wide viewports. "docked" places it
-   * beside the terminal; "overlay" floats it above the terminal without
-   * consuming terminal width. Narrow viewports always use their existing
-   * full-screen overlay presentation.
+   * @deprecated The side-by-side browser view is gone (pages open as tabs).
+   * Still accepted so old settings parse.
    */
-  browserPanelMode: BrowserPanelMode;
+  browserPanelMode?: BrowserPanelMode;
   /** Placement of Chrome DevTools' inspector relative to its screencast. */
   browserInspectorPosition: BrowserInspectorPosition;
-  /** Per-workspace browser/file pane visibility, keyed by workspace path. */
-  workspacePanelState: Record<string, WorkspacePanelState>;
+  /**
+   * @deprecated Per-workspace browser/file pane visibility, from when those
+   * were side panels. No longer read by the UI; kept so old settings parse.
+   */
+  workspacePanelState?: Record<string, WorkspacePanelState>;
   /**
    * Per-workspace open file tabs. Key is the workspace dir (matches
-   * activePath); value is the list of relative paths currently open in
-   * the file panel and which one is active. Empty/missing key → no tabs.
+   * activePath); value lists the open files (relative paths, or `{ path, kind }`
+   * to distinguish a source tab from a rendered preview) and the active one.
+   * Empty/missing key → no tabs.
    */
-  filePanelTabs: Record<string, { open: string[]; active: string | null }>;
+  filePanelTabs: Record<
+    string,
+    { open: Array<{ path: string; kind: 'source' | 'preview' } | string>; active?: string | null }
+  >;
+  /**
+   * Per-workspace tab-strip order: tab ids, left to right, across every tab
+   * kind (terminal, browser, file, plugin). Integrations restore their tabs
+   * asynchronously; the host slots each reappearing id back into its saved
+   * position. Ids of tabs not currently open are kept so a late restore still
+   * lands in place; closing a tab drops its id.
+   */
+  tabOrder: Record<string, string[]>;
+  /** Selected left-sidebar section: "workspaces" or a plugin panel id. */
+  sidebarSection: string;
   /**
    * Whether pseudonymous usage + performance telemetry is enabled. Opt-out:
    * defaults to true; set false (via the Settings UI or `omniterm telemetry
@@ -114,11 +127,10 @@ const DEFAULT_SETTINGS: Settings = {
   workspacesPanelMode: 'docked',
   workspacesPanelDockedOpen: true,
   workspaceFilterActiveOnly: false,
-  filesPanelMode: 'docked',
-  browserPanelMode: 'docked',
   browserInspectorPosition: 'hidden',
-  workspacePanelState: {},
   filePanelTabs: {},
+  tabOrder: {},
+  sidebarSection: 'workspaces',
   telemetryEnabled: true,
   terminalRenderer: 'webgl',
 };
@@ -253,6 +265,9 @@ export function saveSettings(partial: Partial<Settings>): Settings {
   }
   if (partial.filePanelTabs) {
     updated.filePanelTabs = { ...current.filePanelTabs, ...partial.filePanelTabs };
+  }
+  if (partial.tabOrder) {
+    updated.tabOrder = { ...current.tabOrder, ...partial.tabOrder };
   }
   if (partial.workspacePanelState) {
     updated.workspacePanelState = {

@@ -2,7 +2,6 @@
 
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import styles from './WorkspacePanel.module.css';
-import TopBar, { topBarActionStyle } from './TopBar';
 import { useResizeDrag, type DragInfo } from './ResizeHandle';
 import { filterWorkspacePanelData, hasActiveWorkspacePath } from './workspaceFilter';
 import { buildRepoLabels } from './repoLabels';
@@ -49,12 +48,76 @@ interface Props {
   onRemoveDir: (dir: string) => void;
   onSelectDirectory: (cwd: string) => void;
   onToggleActiveOnly: () => void;
-  onRefresh: () => void;
-  onGoHome: () => void;
-  onCollapse: () => void;
 }
 
-// Sidebar is always rendered as an overlay — width controlled by parent
+/**
+ * Actions for the sidebar header while the Workspaces section is showing:
+ * deselect (home), active-only filter, refresh. They live in the Sidebar's
+ * header row rather than a second header inside the panel.
+ */
+export function WorkspaceHeaderActions({
+  activeOnly,
+  onToggleActiveOnly,
+  onRefresh,
+  onGoHome,
+}: {
+  activeOnly: boolean;
+  onToggleActiveOnly: () => void;
+  onRefresh: () => void;
+  onGoHome: () => void;
+}) {
+  const filterLabel = activeOnly ? 'Show all workspaces' : 'Show active sessions only';
+  return (
+    <>
+      <button
+        className={styles.headerBtn}
+        onClick={onGoHome}
+        title="Deselect workspace"
+        aria-label="Deselect workspace"
+      >
+        <svg {...iconProps}>
+          <path d="M3 10.5L12 3l9 7.5" />
+          <path d="M5 9v11h14V9" />
+        </svg>
+      </button>
+      <button
+        className={styles.headerBtn}
+        style={activeOnly ? { color: 'var(--warning)' } : undefined}
+        onClick={onToggleActiveOnly}
+        title={filterLabel}
+        aria-label={filterLabel}
+        aria-pressed={activeOnly}
+      >
+        <svg {...iconProps}>
+          <path d="M3 6h10" />
+          <path d="M3 12h18" />
+          <path d="M3 18h10" />
+          <circle cx="18" cy="6" r="2.5" fill="currentColor" stroke="none" />
+        </svg>
+      </button>
+      <button className={styles.headerBtn} onClick={onRefresh} title="Refresh" aria-label="Refresh">
+        <svg {...iconProps}>
+          <polyline points="23 4 23 10 17 10" />
+          <polyline points="1 20 1 14 7 14" />
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+        </svg>
+      </button>
+    </>
+  );
+}
+
+const iconProps = {
+  width: 14,
+  height: 14,
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 2,
+  strokeLinecap: 'round' as const,
+  strokeLinejoin: 'round' as const,
+  'aria-hidden': true,
+};
+
 
 const Chevron = ({ open }: { open: boolean }) => (
   <svg
@@ -89,9 +152,6 @@ export default function WorkspacePanel({
   onRemoveDir,
   onSelectDirectory,
   onToggleActiveOnly,
-  onRefresh,
-  onGoHome,
-  onCollapse,
 }: Props) {
   const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set(repos.map((r) => r.id)));
   const [renamingWtId, setRenamingWtId] = useState<string | null>(null);
@@ -126,7 +186,8 @@ export default function WorkspacePanel({
     const el = sidebarRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const headerH = 36;
+    // The section header lives in the Sidebar, outside this element.
+    const headerH = 0;
     const dividerH = 24;
     const topPanelHeight = y - rect.top - headerH - dividerH / 2;
     setDividerPercent(Math.min(85, Math.max(15, (topPanelHeight / rect.height) * 100)));
@@ -216,74 +277,6 @@ export default function WorkspacePanel({
 
   return (
     <aside ref={sidebarRef} className={styles.panel} aria-label="Workspaces">
-      {/* Header */}
-      <TopBar
-        left={
-          <button style={topBarActionStyle} onClick={onCollapse} title="Close workspaces">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <polyline points="15 18 9 12 15 6" />
-            </svg>
-          </button>
-        }
-        right={
-          <>
-            <button
-              style={{
-                ...topBarActionStyle,
-                color: activeOnly ? 'var(--warning, #d29922)' : undefined,
-              }}
-              onClick={onToggleActiveOnly}
-              title={activeOnly ? 'Show all workspaces' : 'Show active sessions only'}
-              aria-label={activeOnly ? 'Show all workspaces' : 'Show active sessions only'}
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M3 6h10" />
-                <path d="M3 12h18" />
-                <path d="M3 18h10" />
-                <circle cx="18" cy="6" r="2.5" fill="currentColor" stroke="none" />
-              </svg>
-            </button>
-            <button style={topBarActionStyle} onClick={onRefresh} title="Refresh">
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polyline points="23 4 23 10 17 10" />
-                <polyline points="1 20 1 14 7 14" />
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-              </svg>
-            </button>
-          </>
-        }
-      >
-        <span className={styles.title} onClick={onGoHome} title="Deselect">
-          WORKSPACES
-        </span>
-      </TopBar>
 
       {/* WORKTREES panel */}
       <div className={styles.panel} style={{ height: `${dividerPercent}%` }}>
