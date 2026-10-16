@@ -185,6 +185,25 @@ test('loadSettings survives a non-string trackedRepos entry instead of resetting
   );
 });
 
+test('loadSettings drops repeated trackedRepos and trackedDirs entries', async () => {
+  const { loadSettings } = await import('./settings.js');
+  const repo = dir('twice-tracked');
+
+  writeFileSync(
+    SETTINGS_PATH,
+    JSON.stringify({
+      trackedRepos: [repo, repo],
+      trackedDirs: ['/tmp/a', '/tmp/b', '/tmp/a'],
+    }),
+  );
+
+  const s = loadSettings();
+
+  // Each duplicate rendered as a second identical workspace with the same id.
+  assert.deepStrictEqual(s.trackedRepos, [repo]);
+  assert.deepStrictEqual(s.trackedDirs, ['/tmp/a', '/tmp/b'], 'first occurrence keeps its place');
+});
+
 test('loadSettings rekeys namingSchemes from legacy basename ids to repo ids', async () => {
   const { loadSettings } = await import('./settings.js');
   const { repoIdForPath } = await import('./ids.js');
