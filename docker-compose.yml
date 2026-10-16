@@ -1,3 +1,14 @@
+x-omniterm-env: &omniterm-env
+  OMNITERM_TELEMETRY: "0"
+  # The browser's clock. Match where you (and your IP) are: a UTC browser
+  # on a US address is a common bot signal.
+  TZ: "${TZ:-America/Boise}"
+  # Remote browser window size and pixel density used before the panel
+  # attaches. While the panel is open it resizes the page to match itself
+  # (size and devicePixelRatio), so these are only the starting point.
+  OMNITERM_BROWSER_WINDOW_SIZE: "1440,900"
+  OMNITERM_BROWSER_SCALE: "2"
+
 services:
   omniterm:
     build: .
@@ -7,22 +18,62 @@ services:
     # "17717:17717" to expose on the LAN (trusted networks only).
     ports:
       - "127.0.0.1:17717:17717"
-    environment:
-      OMNITERM_TELEMETRY: "0"
-      # The browser's clock. Match where you (and your IP) are: a UTC browser
-      # on a US address is a common bot signal.
-      TZ: "${TZ:-America/Boise}"
-      # Remote browser window size and pixel density used before the panel
-      # attaches. While the panel is open it resizes the page to match itself
-      # (size and devicePixelRatio), so these are only the starting point.
-      OMNITERM_BROWSER_WINDOW_SIZE: "1440,900"
-      OMNITERM_BROWSER_SCALE: "2"
+    environment: *omniterm-env
     volumes:
       - omniterm-settings:/home/node/.omniterm
       - ./:/home/node/work/omniterm
+      # The host home at the same path, so paths match on both sides. It is
+      # outside the container's $HOME (/home/node): add a folder under it from
+      # the Workspaces "Add" button to open it in omniterm.
+      - type: bind
+        source: /home/dapplegate
+        target: /home/dapplegate
     shm_size: 1gb
     init: true
     restart: unless-stopped
 
+  # omniterm itself, run from this checkout with hot reload:
+  #   docker compose --profile dev up omniterm-dev   →   http://localhost:5173
+  # vite serves the UI with HMR; `tsx watch` restarts the server when server
+  # code changes (terminals survive — tmux owns them). Uses the host's
+  # node_modules through the bind mount, so run `corepack pnpm install` on the
+  # host first. Separate settings volume, so it never touches the main
+  # instance's workspaces and tabs.
+  omniterm-dev:
+    profiles: [dev]
+    image: omniterm:local
+    container_name: omniterm-dev
+    ports:
+      - "127.0.0.1:5173:5173"
+    environment:
+      <<: *omniterm-env
+      OMNITERM_PORT: "17717"
+      OMNITERM_DEV_HOST: "0.0.0.0"
+      NODE_ENV: development
+    volumes:
+      - omniterm-dev-settings:/home/node/.omniterm
+      - type: bind
+        source: /home/dapplegate
+        target: /home/dapplegate
+    working_dir: /home/dapplegate/git/omniterm
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ ! -f node_modules/vite/bin/vite.js ] || [ ! -f node_modules/tsx/dist/cli.mjs ]; then
+          echo "omniterm-dev: no node_modules; run 'corepack pnpm install' in $$PWD on the host" >&2
+          exit 1
+        fi
+        # The server refuses to boot without a built client bundle, even
+        # though vite serves the UI in dev.
+        [ -f packages/core/dist/client/index.html ] ||
+          node node_modules/vite/bin/vite.js build --config packages/core/vite.config.ts
+        node node_modules/tsx/dist/cli.mjs watch apps/omniterm/src/server.ts &
+        exec node node_modules/vite/bin/vite.js --config packages/core/vite.config.ts
+    shm_size: 1gb
+    init: true
+
 volumes:
   omniterm-settings:
+  omniterm-dev-settings:
