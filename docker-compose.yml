@@ -1,0 +1,28 @@
+services:
+  omniterm:
+    build: .
+    image: omniterm:local
+    container_name: omniterm
+    # omniterm has no auth of its own — bind to loopback only. Change to
+    # "17717:17717" to expose on the LAN (trusted networks only).
+    ports:
+      - "127.0.0.1:17717:17717"
+    environment:
+      OMNITERM_TELEMETRY: "0"
+      # The browser's clock. Match where you (and your IP) are: a UTC browser
+      # on a US address is a common bot signal.
+      TZ: "${TZ:-America/Boise}"
+      # Remote browser window size and pixel density used before the panel
+      # attaches. While the panel is open it resizes the page to match itself
+      # (size and devicePixelRatio), so these are only the starting point.
+      OMNITERM_BROWSER_WINDOW_SIZE: "1440,900"
+      OMNITERM_BROWSER_SCALE: "2"
+    volumes:
+      - omniterm-settings:/home/node/.omniterm
+      - ./:/home/node/work/omniterm
+    shm_size: 1gb
+    init: true
+    restart: unless-stopped
+
+volumes:
+  omniterm-settings:
