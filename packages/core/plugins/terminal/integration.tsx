@@ -15,15 +15,16 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
-import type { HostApi, MainContentContext, PluginIntegration, Tab } from '../../app/types';
+import type { HostApi, PluginIntegration, Tab } from '../../app/types';
 import { track } from '../../app/telemetryClient';
-import TabBrowserView from '../../browserRegistry/TabBrowserView';
-import type { BrowserInspectorPosition, BrowserPanelMode } from '../../lib/settings';
+import { TerminalIcon } from '../../app/components/icons';
 import TerminalView from './components/TerminalView';
 import MobileInputChrome from './components/MobileInputChrome';
 import {
   buildWarmRenderList,
+  mergeRestoredTabs,
   pruneSessionsFromByPath,
+  restoreTabsFromSnapshot,
   survivingTerminalTabs,
   type SessionInfo,
   type WarmSnapshot,
@@ -51,23 +52,8 @@ export interface UseTerminalIntegrationArgs {
    *  When restoring from saved settings, entries with these types are
    *  dropped to avoid ghosted indicators on reload. */
   ephemeralTabTypes?: ReadonlySet<string>;
-  /** Top-bar "show browser pane" toggle owned by the host. Terminal
-   *  integration uses it to decide whether to render its inline
-   *  TabBrowserView. */
-  browserPanelOpen: boolean;
-  /** Setter for the top-bar toggle, used to dismiss the mobile fullscreen
-   *  browser pane via its own [×] button. */
-  setBrowserPanelOpen: Dispatch<SetStateAction<boolean>>;
-  /** Wide-viewport browser presentation. Mobile always uses fullscreen. */
-  browserPanelMode: BrowserPanelMode;
-  /** Placement of Chrome DevTools' inspector around the screencast. */
-  browserInspectorPosition: BrowserInspectorPosition;
-  /** Mobile-narrow layout flag. Drives the fullscreen-replacement mode
-   *  for the browser pane. */
+  /** Mobile-narrow layout flag. Drives the mobile key bar / compose field. */
   isMobile: boolean;
-  /** Files-panel-open flag — terminal integration suppresses its mobile
-   *  browser fullscreen when files are showing instead. */
-  filesPanelOpen: boolean;
   /** True once the host has loaded /api/settings. The integration must
    *  not write terminalTabs before this, or it would clobber server-side
    *  defaults. */
@@ -96,12 +82,7 @@ export function useTerminalIntegration(
     setTabs,
     setActiveTabId,
     ephemeralTabTypes,
-    browserPanelOpen,
-    setBrowserPanelOpen,
-    browserPanelMode,
-    browserInspectorPosition,
     isMobile,
-    filesPanelOpen,
     settingsHydrated,
     refreshWorkspaces,
   } = args;
@@ -127,14 +108,6 @@ export function useTerminalIntegration(
   const [orphanSessions, setOrphanSessions] = useState<OrphanSessions>({});
   const [alertedPaths, setAlertedPaths] = useState<Set<string>>(new Set());
   const [alertedSessionIds, setAlertedSessionIds] = useState<Set<string>>(new Set());
-  /** Side-pane (TabBrowserView) width in px. Default leaves ~120 chars
-   *  for the left panel (≈1080px at a typical monospace cell width);
-   *  user-driven via the panel's left-edge drag handle from there. */
-  const [browserPaneWidth, setBrowserPaneWidth] = useState(() => {
-    if (typeof window === 'undefined') return 640;
-    return Math.max(300, window.innerWidth - 1080);
-  });
-  const [isResizingBrowser, setIsResizingBrowser] = useState(false);
 
   // Refs for SSE handler to avoid tearing down EventSource on every state change.
   const activePathRef = useRef(activePath);
@@ -187,7 +160,9 @@ export function useTerminalIntegration(
       }
       return {
         ...prev,
-        [activePath]: { sessions: sessionMap, tabs: terminalTabs, activeTabId },
+        // `allTabs` keeps the workspace's other tabs (browser pages, files)
+        // in strip order so a warm switch back restores the whole strip.
+        [activePath]: { sessions: sessionMap, tabs: terminalTabs, allTabs: [...tabs], activeTabId },
       };
     });
   }, [activePath, flatPath, restoredPath, sessionMap, tabs, activeTabId]);
@@ -216,7 +191,10 @@ export function useTerminalIntegration(
       // never torn down, so their sessions are already current; dead sessions
       // are pruned via the SSE `session-closed` handler instead.
       setSessionMap(snap.sessions);
-      setTabs(snap.tabs);
+      // The whole strip, not just terminals. Other integrations re-add their
+      // own tabs too; the host's openTab is idempotent on id, so whichever
+      // runs first wins and nothing is duplicated.
+      setTabs(restoreTabsFromSnapshot(snap));
       setActiveTabId(snap.activeTabId);
       setFlatPath(path);
       setRestoredPath(path);
@@ -317,31 +295,9 @@ export function useTerminalIntegration(
       restoreReadFailedRef.current[dirPath] = !settingsReadOk;
 
       setSessionMap(newMap);
-      setTabs((prevTabs) => {
-        if (savedTabs && prevTabs.length === 0) {
-          const savedIds = new Set(savedTabs.map((t) => t.id));
-          const extras: Tab[] = [];
-          for (const s of data) {
-            if (!savedIds.has(s.id))
-              extras.push({ type: 'terminal', id: s.id, name: `Term ${s.id.slice(-4)}` });
-          }
-          return [...savedTabs, ...extras];
-        }
-
-        // Add tabs for sessions we don't already have; drop terminal tabs whose
-        // session is no longer live.
-        const existingTerminalIds = new Set(
-          prevTabs.filter((t) => t.type === 'terminal').map((t) => t.id),
-        );
-        const additions: Tab[] = [];
-        for (const s of data) {
-          if (!existingTerminalIds.has(s.id))
-            additions.push({ type: 'terminal', id: s.id, name: `Term ${s.id.slice(-4)}` });
-        }
-        return [...prevTabs, ...additions].filter((t) =>
-          t.type !== 'terminal' ? true : liveIds.has(t.id),
-        );
-      });
+      setTabs((prevTabs) =>
+        mergeRestoredTabs({ prevTabs, savedTabs, liveSessionIds: data.map((s) => s.id) }),
+      );
 
       setActiveTabId((prev) => {
         if (prev && data.some((s) => s.id === prev)) return prev;
@@ -623,32 +579,8 @@ export function useTerminalIntegration(
     fetch(`/api/sessions/${tab.id}`, { method: 'DELETE' });
   }, []);
 
-  // ----- main content render -----
-
-  const renderMain = useCallback(
-    (ctx: MainContentContext): ReactNode => {
-      if (ctx.activeTab.type !== 'terminal') return null;
-      const tab = ctx.activeTab;
-
-      // Mobile + browser-pane toggled on → fullscreen TabBrowserView. The
-      // top-bar toggle is hidden in mobile, so the view exposes its own [×].
-      if (isMobile && ctx.browserPanelOpen && !filesPanelOpen) {
-        return (
-          <TabBrowserView
-            tabId={tab.id}
-            inspectorPosition={browserInspectorPosition}
-            onClose={() => setBrowserPanelOpen(false)}
-          />
-        );
-      }
-
-      // Terminal panes render in iframeTabsLayer so their ttyd iframes stay
-      // mounted across tab switches. Returning null here lets that persistent
-      // layer own the normal desktop terminal surface.
-      return null;
-    },
-    [isMobile, filesPanelOpen, setBrowserPanelOpen, browserInspectorPosition],
-  );
+  // No `mainContent`: terminal panes render in iframeTabsLayer so their ttyd
+  // iframes stay mounted across tab switches.
 
   // Backs the mobile key bar / compose field. Each terminal iframe registers
   // itself by session id; `resolveTerminalWindow(id)` looks up a session's live
@@ -709,7 +641,13 @@ export function useTerminalIntegration(
       });
       if (renderList.length === 0) return null;
 
-      const mobileBrowserHiding = isMobile && browserPanelOpen && !filesPanelOpen;
+      // A browser page / file / plugin tab is in front: hide every terminal
+      // pane (they stay mounted, so they stay warm) and let clicks through to
+      // that tab's content underneath this layer. An activeTabId the host's
+      // list does not know yet (mid-switch) is not "another tab" — the panes
+      // fall back to their snapshot's active tab so the surface never blanks.
+      const activeHostTab = tabs.find((t) => t.id === activeTabId);
+      const otherTabActive = activeHostTab != null && activeHostTab.type !== 'terminal';
 
       // Single pass over renderList: is a terminal the active visible surface,
       // and what is its session id (null mid-load / browser-pane hiding). One
@@ -717,7 +655,7 @@ export function useTerminalIntegration(
       let activeTerminalVisible = false;
       let activeSessionId: string | null = null;
       for (const entry of renderList) {
-        if (!entry.visible || mobileBrowserHiding) continue;
+        if (!entry.visible || otherTabActive) continue;
         // Only the visible workspace that actually owns the host's activeTabId is
         // the active terminal. Guarding both on this (rather than the snapshot
         // fallback) stops a second visible workspace's session from winning
@@ -754,9 +692,11 @@ export function useTerminalIntegration(
             // snapshot's own active tab (the mid-switch frame where activePath
             // flipped but activeTabId hasn't — keeps the surface from flashing blank).
             const wsActiveTabId =
-              entry.visible && entry.data.tabs.some((t) => t.id === activeTabId)
-                ? activeTabId
-                : entry.data.activeTabId;
+              entry.visible && otherTabActive
+                ? null
+                : entry.visible && entry.data.tabs.some((t) => t.id === activeTabId)
+                  ? activeTabId
+                  : entry.data.activeTabId;
 
             return (
               <div
@@ -769,27 +709,8 @@ export function useTerminalIntegration(
               >
                 {entry.data.tabs.map((tab) => {
                   const isActiveTab = tab.id === wsActiveTabId;
-                  const hiddenByMobileBrowser = entry.visible && isActiveTab && mobileBrowserHiding;
                   // A terminal tab is 1:1 with a session (tab.id === sessionId).
                   const session = entry.data.sessions[tab.id];
-                  const showSidePane =
-                    entry.visible && isActiveTab && browserPanelOpen && !isMobile;
-                  const browserView = showSidePane ? (
-                    <TabBrowserView
-                      tabId={tab.id}
-                      width={browserPaneWidth}
-                      inspectorPosition={browserInspectorPosition}
-                      presentation={browserPanelMode === 'overlay' ? 'overlay' : 'inline'}
-                      onWidthChange={setBrowserPaneWidth}
-                      onResizeStart={() => setIsResizingBrowser(true)}
-                      onResizeEnd={() => setIsResizingBrowser(false)}
-                      onClose={
-                        browserPanelMode === 'overlay'
-                          ? () => setBrowserPanelOpen(false)
-                          : undefined
-                      }
-                    />
-                  ) : null;
 
                   return (
                     <div
@@ -797,47 +718,33 @@ export function useTerminalIntegration(
                       style={{
                         position: 'absolute',
                         inset: 0,
-                        display: isActiveTab && !hiddenByMobileBrowser ? 'flex' : 'none',
-                        flexDirection: 'row',
+                        display: isActiveTab ? 'flex' : 'none',
+                        flexDirection: 'column',
                         minWidth: 0,
                         minHeight: 0,
                         background: 'var(--bg, #1e1e1e)',
                       }}
                     >
-                      {entry.visible && isActiveTab && isResizingBrowser && (
-                        <div style={{ position: 'absolute', inset: 0, zIndex: 100 }} />
+                      {session ? (
+                        <TerminalView
+                          sessionId={session.id}
+                          port={session.port}
+                          ref={iframeRefFor(session.id)}
+                        />
+                      ) : (
+                        <div
+                          style={{
+                            flex: 1,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'var(--text-muted)',
+                            fontSize: '14px',
+                          }}
+                        >
+                          Loading…
+                        </div>
                       )}
-                      <div
-                        style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}
-                      >
-                        {session ? (
-                          <TerminalView
-                            sessionId={session.id}
-                            port={session.port}
-                            ref={iframeRefFor(session.id)}
-                          />
-                        ) : (
-                          <div
-                            style={{
-                              flex: 1,
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              color: 'var(--text-muted)',
-                              fontSize: '14px',
-                            }}
-                          >
-                            Loading…
-                          </div>
-                        )}
-                      </div>
-                      {/* Both modes render the panel as a direct child of this
-                          absolutely-positioned tab surface. Overlay mode floats
-                          it via its own `presentation` prop rather than a
-                          wrapper, so the panel's parent box is the surface in
-                          both cases — which is what its left-edge resize handle
-                          measures the drag limit against. */}
-                      {browserView}
                     </div>
                   );
                 })}
@@ -864,15 +771,6 @@ export function useTerminalIntegration(
       flatPath,
       activePath,
       isMobile,
-      browserPanelOpen,
-      browserPanelMode,
-      browserInspectorPosition,
-      filesPanelOpen,
-      isResizingBrowser,
-      browserPaneWidth,
-      setBrowserPaneWidth,
-      setIsResizingBrowser,
-      setBrowserPanelOpen,
       iframeRefFor,
       resolveTerminalWindow,
     ],
@@ -893,11 +791,16 @@ export function useTerminalIntegration(
 
   const workspaceReady = activePath != null && restoredPath === activePath;
 
+  const tabIcon = useCallback(
+    (tab: Tab): ReactNode | null => (tab.type === 'terminal' ? <TerminalIcon size={14} /> : null),
+    [],
+  );
+
   const integration: PluginIntegration = useMemo(
     () => ({
       tabTypeChoice,
       onCloseTab,
-      mainContent: renderMain,
+      tabIcon,
       iframeTabsLayer: renderTerminalLayer,
       alertedPaths,
       alertedTabIds,
@@ -907,7 +810,7 @@ export function useTerminalIntegration(
     [
       tabTypeChoice,
       onCloseTab,
-      renderMain,
+      tabIcon,
       renderTerminalLayer,
       alertedPaths,
       alertedTabIds,

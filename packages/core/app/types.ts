@@ -19,6 +19,29 @@ export interface Tab {
   id: string;
   /** Display label in the tab bar. Plugins/host may rename. */
   name: string;
+  /** Unsaved changes. The tab bar shows a dot in place of the close button. */
+  dirty?: boolean;
+  /** Hover text (e.g. a file's full path or a page's URL). Defaults to `name`. */
+  title?: string;
+  /** Image drawn as the tab's icon (e.g. a page favicon). Falls back to the
+   *  owning integration's `tabIcon`, then to the host's per-type default. */
+  iconUrl?: string;
+  /** `false` hides double-click rename (file and browser tabs are named by
+   *  what they show). Default: renamable. */
+  renamable?: boolean;
+}
+
+/** A section of the left sidebar, shown beside the built-in Workspaces list. */
+export interface SidebarPanel {
+  /** Stable key (also persisted as the selected section). */
+  id: string;
+  /** Label on the sidebar's section switcher. */
+  label: string;
+  /** Icon on the sidebar's section switcher. */
+  icon: ReactNode;
+  /** Section body. `closeSidebar` lets an overlay/mobile sidebar dismiss
+   *  itself after the user picks something (e.g. opens a file). */
+  render: (ctx: { isMobile: boolean; closeSidebar: () => void }) => ReactNode;
 }
 
 /**
@@ -32,16 +55,23 @@ export interface HostApi {
    * Activates the new tab unless `options.activate === false` (used by the
    * host to spawn background landing tabs without stealing focus).
    */
-  openTab(tab: Tab, options?: { activate?: boolean }): void;
+  openTab(tab: Tab, options?: { activate?: boolean; after?: string }): void;
+  /** Patch a tab's display fields (name, dirty, title, iconUrl). No-op for an
+   *  unknown id. */
+  updateTab(id: string, patch: Partial<Omit<Tab, 'id' | 'type'>>): void;
+  /** Drop a tab whose backing thing is already gone (a closed page, a deleted
+   *  file). Unlike a user close, this does NOT run `beforeCloseTab` or
+   *  `onCloseTab`. If it was active, the host activates a neighbour. */
+  removeTab(id: string): void;
+  /** Bring an existing tab to the front. No-op for an unknown id. */
+  activateTab(id: string): void;
 }
 
 /** Render context passed to a plugin's `mainContent` slot. */
 export interface MainContentContext {
   /** Currently active tab; never null when the slot is invoked. */
   activeTab: Tab;
-  /** Whether the host's "show browsers" top-bar toggle is on. Plugins
-   *  that render a side-pane browser view (terminal, agent-standalone)
-   *  use this to decide whether to render it inline. */
+  /** @deprecated Browser pages are tabs now; the host always passes `false`. */
   browserPanelOpen: boolean;
 }
 
@@ -79,6 +109,14 @@ export interface PluginIntegration {
   /** Called by the host when a tab whose `type` belongs to this plugin
    *  is closed. Plugins should ignore tabs of other types. */
   onCloseTab?: (tab: Tab) => void;
+  /** Asked before a user-initiated close of a tab this integration owns.
+   *  Resolve `false` to keep the tab (e.g. the user cancelled an unsaved-
+   *  changes prompt). Every integration is asked; any `false` vetoes. */
+  beforeCloseTab?: (tab: Tab) => boolean | Promise<boolean>;
+  /** Icon for a tab this integration owns; `null` for other tabs. */
+  tabIcon?: (tab: Tab) => ReactNode | null;
+  /** Extra left-sidebar sections (e.g. the file tree). */
+  sidebarPanels?: ReadonlyArray<SidebarPanel>;
   /** Tab types whose state is process-bound and should NOT be restored
    *  from saved settings on page reload. */
   ephemeralTabTypes?: ReadonlySet<string>;
@@ -133,6 +171,7 @@ export function composeIntegrations(...integrations: ReadonlyArray<PluginIntegra
   for (const i of integrations) for (const id of i.alertedTabIds ?? []) alertedTabIds.add(id);
   // `!== false` so `undefined` (didn't gate) and `true` both pass; only `false` blocks.
   const workspaceReady = integrations.every((i) => i.workspaceReady !== false);
+  const sidebarPanels = integrations.flatMap((i) => i.sidebarPanels ?? []);
   const refreshHandlers = integrations.flatMap((i) =>
     i.onWorkspaceRefresh ? [i.onWorkspaceRefresh] : [],
   );
@@ -165,6 +204,20 @@ export function composeIntegrations(...integrations: ReadonlyArray<PluginIntegra
     onCloseTab: (tab: Tab) => {
       for (const i of integrations) i.onCloseTab?.(tab);
     },
+    beforeCloseTab: async (tab: Tab): Promise<boolean> => {
+      for (const i of integrations) {
+        if (i.beforeCloseTab && (await i.beforeCloseTab(tab)) === false) return false;
+      }
+      return true;
+    },
+    tabIcon: (tab: Tab): ReactNode | null => {
+      for (const i of integrations) {
+        const icon = i.tabIcon?.(tab);
+        if (icon) return icon;
+      }
+      return null;
+    },
+    sidebarPanels,
     mainContent: (ctx: MainContentContext): ReactNode => {
       for (const i of integrations) {
         const r = i.mainContent?.(ctx);

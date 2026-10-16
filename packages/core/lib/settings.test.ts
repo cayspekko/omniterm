@@ -57,6 +57,47 @@ test('saveSettings deep-merges panel visibility per workspace', async () => {
   });
 });
 
+test('saveSettings deep-merges tabOrder per workspace and defaults the new keys', async () => {
+  const { loadSettings, saveSettings } = await import('./settings.js');
+  try {
+    rmSync(SETTINGS_PATH);
+  } catch {
+    /* fresh */
+  }
+
+  let s = loadSettings();
+  assert.deepStrictEqual(s.tabOrder, {}, 'tabOrder defaults to an empty map');
+  assert.strictEqual(s.sidebarSection, 'workspaces');
+
+  saveSettings({ tabOrder: { '/a': ['t1', 'file:x', 'browser:1'] } });
+  saveSettings({ tabOrder: { '/b': ['t2'] } });
+  // Re-saving one workspace replaces only that workspace's order.
+  saveSettings({ tabOrder: { '/a': ['browser:1', 't1'] } });
+
+  s = loadSettings();
+  assert.deepStrictEqual(s.tabOrder, { '/a': ['browser:1', 't1'], '/b': ['t2'] });
+});
+
+test('loadSettings still parses legacy files/browser panel settings', async () => {
+  const { loadSettings } = await import('./settings.js');
+
+  writeFileSync(
+    SETTINGS_PATH,
+    JSON.stringify({
+      filesPanelMode: 'overlay',
+      browserPanelMode: 'docked',
+      workspacePanelState: { '/a': { browserOpen: null, filesOpen: true } },
+      filePanelTabs: { '/a': { open: ['README.md', { path: 'doc.md', kind: 'preview' }] } },
+      terminalTabs: { '/a': [{ id: 's1', name: 'One' }] },
+    }),
+  );
+
+  const s = loadSettings();
+  assert.deepStrictEqual(s.terminalTabs, { '/a': [{ id: 's1', name: 'One' }] }, 'not reset');
+  assert.deepStrictEqual(s.tabOrder, {});
+  assert.strictEqual(s.filePanelTabs['/a'].open.length, 2);
+});
+
 test('loadSettings migrates global panel visibility to the active workspace', async () => {
   const { loadSettings } = await import('./settings.js');
 
