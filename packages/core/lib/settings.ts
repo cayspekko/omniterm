@@ -128,6 +128,16 @@ function onlyStrings(value: unknown): string[] {
 }
 
 /**
+ * onlyStrings, keeping the first of any repeated entry. A tracked path can be
+ * appended twice — e.g. a repo whose checkout vanished (container rebuilt)
+ * stays tracked but hidden, and cloning it again re-adds the same path — and
+ * every duplicate renders as a second identical workspace with the same id.
+ */
+function uniqueStrings(value: unknown): string[] {
+  return [...new Set(onlyStrings(value))];
+}
+
+/**
  * Rekey `namingSchemes` from the legacy basename ids to the path-derived repo
  * ids introduced in lib/ids.ts. Without this every repo looks unassigned after
  * the upgrade and gets a fresh scheme, while the stale basename keys keep
@@ -201,8 +211,8 @@ export function loadSettings(): Settings {
     // array into null). Drop non-strings here: one bad element must not throw,
     // because the catch below would turn that into a silent reset to defaults
     // and the next save would overwrite the user's real repos and tabs.
-    settings.trackedRepos = onlyStrings(settings.trackedRepos);
-    settings.trackedDirs = onlyStrings(settings.trackedDirs);
+    settings.trackedRepos = uniqueStrings(settings.trackedRepos);
+    settings.trackedDirs = uniqueStrings(settings.trackedDirs);
     if (settings.namingSchemes && typeof settings.namingSchemes === 'object') {
       settings.namingSchemes = migrateNamingSchemes(settings.namingSchemes, settings.trackedRepos);
     }

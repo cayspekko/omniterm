@@ -149,8 +149,13 @@ export function cloneRepo(url: string, destination?: string): Repo {
     timeout: 300000,
   });
 
+  // The path can already be tracked: a tracked checkout that has since been
+  // deleted stays in settings (listRepos just hides it), and cloning back to
+  // the same place must not track it a second time.
   const settings = loadSettings();
-  saveSettings({ trackedRepos: [...settings.trackedRepos, clonePath] });
+  if (!settings.trackedRepos.includes(clonePath)) {
+    saveSettings({ trackedRepos: [...settings.trackedRepos, clonePath] });
+  }
 
   return {
     id: repoIdForPath(clonePath),
