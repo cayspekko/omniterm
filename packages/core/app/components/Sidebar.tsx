@@ -82,9 +82,9 @@ export default function Sidebar({
     if (mode === 'overlay') onClose();
   }, [mode, onClose]);
 
-  const sections: Array<{ id: string; label: string; icon: ReactNode }> = [
+  const sections: Array<{ id: string; label: string; icon: ReactNode; badge?: number }> = [
     { id: WORKSPACES_SECTION, label: 'Workspaces', icon: <BranchIcon size={16} /> },
-    ...panels.map((p) => ({ id: p.id, label: p.label, icon: p.icon })),
+    ...panels.map((p) => ({ id: p.id, label: p.label, icon: p.icon, badge: p.badge })),
   ];
 
   const header = (
@@ -104,6 +104,11 @@ export default function Sidebar({
               <span style={S.sectionIcon}>{s.icon}</span>
               {/* Inactive sections collapse to their icon to keep the row short. */}
               {(selected || isMobile) && <span style={S.sectionLabel}>{s.label}</span>}
+              {s.badge !== undefined && s.badge > 0 && (
+                <span style={S.badge} aria-label={`${s.badge} pending`}>
+                  {s.badge > 999 ? '999+' : s.badge}
+                </span>
+              )}
             </button>
           );
         })}
@@ -268,6 +273,20 @@ const S: Record<string, React.CSSProperties> = {
   sectionLabel: {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+  },
+  badge: {
+    minWidth: '16px',
+    height: '16px',
+    padding: '0 4px',
+    borderRadius: '8px',
+    background: 'var(--bg-tertiary)',
+    color: 'var(--text)',
+    fontSize: '10px',
+    fontWeight: 600,
+    lineHeight: '16px',
+    letterSpacing: 0,
+    textAlign: 'center',
+    flexShrink: 0,
   },
   actions: {
     display: 'flex',

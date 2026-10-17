@@ -16,6 +16,7 @@ import { useTerminalIntegration } from '../plugins/terminal/integration';
 import { useManifestIntegration } from '../app/manifestPlugins';
 import { useBrowserIntegration } from '../browserRegistry/useBrowserIntegration';
 import { useFilesIntegration } from '../app/files/useFilesIntegration';
+import { useChangesIntegration } from '../app/changes/useChangesIntegration';
 
 function App() {
   // See apps/testbox/client/main.tsx for why we route through a ref:
@@ -65,12 +66,16 @@ function App() {
     fileIndicatorPaths: preFiles.fileIndicatorPaths,
   });
 
+  // Git changes: the sidebar's Changes section (only inside a git repo).
+  const changes = useChangesIntegration({ activePath: homeState.activePath });
+
   // Order matters for the [+] menu: Terminal, plugins, Browser.
   const composed = composeIntegrations(
     terminal.integration,
     manifest.integration,
     browser.integration,
     files.integration,
+    changes.integration,
   );
   composedRefreshRef.current = composed.onWorkspaceRefresh;
 

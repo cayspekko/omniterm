@@ -320,3 +320,99 @@ button:focus-visible,
   border-color: var(--link);
   color: var(--text-bright);
 }
+
+/* ---- Git: Changes panel + status bar ---- */
+
+.ot-change-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px 0 16px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ot-change-row:hover,
+.ot-change-row:focus-visible {
+  background: var(--bg-tertiary);
+  outline: none;
+}
+
+.ot-change-group {
+  padding-left: 12px;
+  cursor: default;
+}
+
+/* Row actions appear on hover/focus; touch devices always show them. */
+.ot-change-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.ot-change-row:hover .ot-change-actions,
+.ot-change-row:focus-within .ot-change-actions {
+  display: flex;
+}
+
+@media (hover: none) {
+  .ot-change-actions {
+    display: flex;
+  }
+}
+
+.ot-change-act {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  color: var(--text-muted);
+}
+
+.ot-change-act:hover:not(:disabled) {
+  color: var(--text-bright);
+  background: var(--bg);
+}
+
+.ot-commit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 26px;
+  border-radius: 3px;
+  background: var(--accent);
+  color: var(--text-bright);
+  font-size: 12px;
+}
+
+.ot-commit-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.ot-commit-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ot-status-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  min-width: 0;
+  padding: 0 4px;
+  color: inherit;
+  font-size: inherit;
+}
+
+.ot-status-item:hover {
+  color: var(--text-bright);
+  background: var(--bg-tertiary);
+}

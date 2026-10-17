@@ -29,6 +29,7 @@ import { reposRouter } from './routes/repos.js';
 import { worktreesRouter } from './routes/worktrees.js';
 import { settingsRouter } from './routes/settings.js';
 import { fsRouter } from './routes/fs.js';
+import { gitRouter } from './routes/git.js';
 import { previewRouter } from './routes/preview.js';
 import { createManifestRouter, validatePluginManifests } from './routes/manifest.js';
 
@@ -292,6 +293,7 @@ export function startServer(opts: StartServerOptions = {}): Promise<StartServerH
   app.use('/api', worktreesRouter);
   app.use('/api', settingsRouter);
   app.use('/api', fsRouter);
+  app.use('/api', gitRouter);
   app.use('/api', previewRouter);
 
   // When a custom DevTools bundle is provided, serve it at /devtools/
