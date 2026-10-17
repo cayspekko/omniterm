@@ -46,7 +46,7 @@ import {
 } from '../lib/telemetry.js';
 import { addClient, broadcast } from '../lib/events.js';
 import { confinePath } from '../lib/paths.js';
-import { allowedRoots } from '../lib/allowedRoots.js';
+import { allowedRoots, parseAllowedRoots, setExtraAllowedRoots } from '../lib/allowedRoots.js';
 import { listRepos } from '../lib/repos.js';
 import { listWorktrees } from '../lib/worktrees.js';
 import { parseEnvPassthrough, setEnvPassthrough } from '../lib/sessionEnv.js';
@@ -85,6 +85,14 @@ export interface StartServerOptions {
    * (comma-separated, overrides).
    */
   allowedOrigins?: string[];
+  /**
+   * Extra absolute directories the file, preview and git routes (and the
+   * workspace folder picker) may reach, on top of $HOME and the tracked
+   * workspaces — e.g. `/home` to browse other users' homes or a bind mount.
+   * A relative entry makes startServer throw AllowedRootsError. Env:
+   * OMNITERM_ALLOWED_ROOTS (comma-separated, overrides).
+   */
+  allowedRoots?: string[];
   /**
    * Extra tab-type plugins beyond the bundled default (terminal). Order
    * matters for WS upgrade dispatch — the first plugin to claim a URL
@@ -246,6 +254,11 @@ export function startServer(opts: StartServerOptions = {}): Promise<StartServerH
     console.warn('[omniterm] WARNING: allowed origins contains "*" — the cross-site Origin check is DISABLED');
   }
 
+  const rawAllowedRoots = process.env.OMNITERM_ALLOWED_ROOTS;
+  setExtraAllowedRoots(
+    parseAllowedRoots(rawAllowedRoots !== undefined ? [rawAllowedRoots] : (opts.allowedRoots ?? [])),
+  );
+
   // Strip server-only env vars from process.env so they don't leak into
   // child processes (tmux, ttyd, spawned shells). Vars that MUST propagate
   // (OMNITERM_BROWSER_REGISTRY_URL etc.) are passed explicitly via tmux -e.
@@ -256,6 +269,7 @@ export function startServer(opts: StartServerOptions = {}): Promise<StartServerH
     'OMNITERM_TTYD_PORT_MAX',
     'OMNITERM_ENV_PASSTHROUGH',
     'OMNITERM_ALLOWED_ORIGINS',
+    'OMNITERM_ALLOWED_ROOTS',
   ])
     delete process.env[name];
 

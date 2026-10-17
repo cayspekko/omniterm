@@ -8,6 +8,9 @@ x-omniterm-env: &omniterm-env
   # (size and devicePixelRatio), so these are only the starting point.
   OMNITERM_BROWSER_WINDOW_SIZE: "1440,900"
   OMNITERM_BROWSER_SCALE: "2"
+  # Let the Files/git views and the folder picker reach /home (so the host
+  # home bind-mounted below is browsable), not just the container's $HOME.
+  OMNITERM_ALLOWED_ROOTS: /home
 
 services:
   omniterm:
@@ -22,9 +25,9 @@ services:
     volumes:
       - omniterm-settings:/home/node/.omniterm
       - ./:/home/node/work/omniterm
-      # The host home at the same path, so paths match on both sides. It is
-      # outside the container's $HOME (/home/node): add a folder under it from
-      # the Workspaces "Add" button to open it in omniterm.
+      # The host home at the same path, so paths match on both sides. Add a
+      # folder under it from the Workspaces "Add" button to open it in
+      # omniterm (reachable via OMNITERM_ALLOWED_ROOTS above).
       - type: bind
         source: /home/dapplegate
         target: /home/dapplegate

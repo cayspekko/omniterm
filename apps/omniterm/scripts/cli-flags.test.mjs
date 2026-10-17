@@ -154,3 +154,19 @@ test('OMNITERM_ALLOWED_ORIGINS reaches the server through the CLI and wins', { s
     },
   );
 });
+
+test('the CLI forwards --allowed-roots so the folder picker can reach outside $HOME', { skip }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'omniterm-cli-root-'));
+  const browse = (base) => fetch(`${base}/api/browse?path=${encodeURIComponent(root)}`);
+  try {
+    await withCli([], {}, async (base) => assert.equal((await browse(base)).status, 403));
+    await withCli(['--allowed-roots', root], {}, async (base) => {
+      const res = await browse(base);
+      assert.equal(res.status, 200);
+      // Going up from the extra root leaves the allowlist, so no ".." is offered.
+      assert.equal((await res.json()).parent, null);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
