@@ -34,6 +34,10 @@ export { parsePluginSpecs, validatePluginModule, PluginSpecError } from './lib/p
 // never handled here; the wrapper reads them from the backend's environment.
 export { parseEnvPassthroughArgv, EnvNameError } from './lib/sessionEnv.js';
 
+// Origin check (cross-site request / WebSocket hijacking protection). startServer
+// installs it; the error is thrown for a malformed `allowedOrigins` entry.
+export { OriginConfigError, isOriginAllowed, parseAllowedOrigins } from './server/originCheck.js';
+
 // Browser registry primitives — for plugin authors that want their tab's
 // MCP/sandbox child processes to register browsers (terminal, agent, future
 // plugins). The router and upgrade handler are mounted under each plugin's URL

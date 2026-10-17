@@ -45,6 +45,12 @@ Options:
                        Comma-separated variable NAMES that may cross into
                        terminals, on top of the default allowlist (repeatable;
                        env: OMNITERM_ENV_PASSTHROUGH, which overrides)
+  --allowed-origins <origins>
+                       Comma-separated extra browser origins allowed to use the
+                       API and WebSockets, e.g. https://omniterm.example.com
+                       (repeatable; env: OMNITERM_ALLOWED_ORIGINS, which
+                       overrides). Same-host and X-Forwarded-Host origins are
+                       always allowed. "*" disables the check (unsafe).
   --no-telemetry       Disable telemetry for this run only
   --version, -v        Print version and exit
   --help, -h           Show this help
@@ -170,6 +176,17 @@ const [TTYD_MIN, TTYD_MAX] = ttydRangeRaw
   ? parseTtydRange(ttydRangeRaw)
   : [process.env.OMNITERM_TTYD_PORT_MIN ?? '7700', process.env.OMNITERM_TTYD_PORT_MAX ?? '7799'];
 
+// --allowed-origins (repeatable) → OMNITERM_ALLOWED_ORIGINS, unless that env is
+// already set (env wins). The server validates the entries and fails the boot
+// on a malformed one.
+const allowedOriginsFlags = [];
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--allowed-origins' && i + 1 < args.length) allowedOriginsFlags.push(args[++i]);
+}
+const ALLOWED_ORIGINS =
+  process.env.OMNITERM_ALLOWED_ORIGINS ??
+  (allowedOriginsFlags.length ? allowedOriginsFlags.join(',') : undefined);
+
 const serverEntry = path.join(__dirname, '..', 'standalone', 'server', 'server.js');
 const clientEntry = path.join(__dirname, '..', 'standalone', 'client', 'index.html');
 
@@ -213,6 +230,7 @@ const child = spawn(process.execPath, [serverEntry, ...forwardedArgs], {
     OMNITERM_TTYD_PORT_MIN: TTYD_MIN,
     OMNITERM_TTYD_PORT_MAX: TTYD_MAX,
     OMNITERM_VERSION: process.env.OMNITERM_VERSION ?? APP_VERSION,
+    ...(ALLOWED_ORIGINS !== undefined ? { OMNITERM_ALLOWED_ORIGINS: ALLOWED_ORIGINS } : {}),
     // --no-telemetry: disable for this run only (persistent opt-out is the
     // `omniterm telemetry off` command / the Settings toggle).
     ...(args.includes('--no-telemetry') ? { OMNITERM_TELEMETRY: '0' } : {}),
