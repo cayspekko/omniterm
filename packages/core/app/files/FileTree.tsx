@@ -36,6 +36,8 @@ interface Props {
   changesOnly: boolean;
   /** Workspace-relative path of the active tab's file (highlighted). */
   activeRelPath: string | null;
+  /** Scroll to and flash this row once it renders; a new `seq` repeats it. */
+  reveal?: { path: string; seq: number } | null;
   fileHandlers?: PluginIntegration['fileHandlers'];
   fileIndicatorPaths?: ReadonlySet<string>;
   host: HostApi;
@@ -257,6 +259,7 @@ export default function FileTree({
   gitStatus,
   changesOnly,
   activeRelPath,
+  reveal,
   fileHandlers,
   fileIndicatorPaths,
   host,
@@ -281,6 +284,21 @@ export default function FileTree({
     null,
   );
   const menuRef = useRef<HTMLDivElement>(null);
+  const treeRef = useRef<HTMLDivElement>(null);
+
+  // Folders load asynchronously, so retry on each tree change until the
+  // revealed row exists, then handle that reveal once.
+  const revealedSeqRef = useRef(0);
+  useEffect(() => {
+    if (!reveal || reveal.seq === revealedSeqRef.current) return;
+    const row = treeRef.current?.querySelector<HTMLElement>(`[data-rel="${CSS.escape(reveal.path)}"]`);
+    if (!row) return;
+    revealedSeqRef.current = reveal.seq;
+    row.scrollIntoView({ block: 'center' });
+    row.classList.remove('ot-tree-flash');
+    void row.offsetWidth; // restart the animation on a repeat reveal
+    row.classList.add('ot-tree-flash');
+  });
   const [editing, setEditing] = useState<Editing | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ relPath: string; isDir: boolean } | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
@@ -490,6 +508,7 @@ export default function FileTree({
               aria-expanded={isDir ? isExpanded : undefined}
               aria-selected={isSelected}
               data-menu-open={menu?.target === fullPath ? 'true' : undefined}
+              data-rel={fullPath}
               title={fullPath}
               draggable={draggable && !renaming}
               style={{
@@ -650,6 +669,7 @@ export default function FileTree({
         </div>
       )}
       <div
+        ref={treeRef}
         style={S.treeContent}
         role="tree"
         // Right-click on empty space: the workspace root's menu.

@@ -134,6 +134,8 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
   const [hydratedPath, setHydratedPath] = useState<string | null>(null);
   const [tree, setTree] = useState<DirEntry[]>([]);
   const [expandedDirs, setExpandedDirs] = useState<Record<string, DirEntry[]>>({});
+  // A file to scroll to and flash in the tree; `seq` re-fires a repeat reveal.
+  const [reveal, setReveal] = useState<{ path: string; seq: number } | null>(null);
   const [gitStatus, setGitStatus] = useState<Record<string, string>>({});
   const [changesOnly, setChangesOnly] = useState(false);
   /** Per-preview-tab reload nonce, keyed by tab id. */
@@ -608,6 +610,30 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
     [openDiff, openFile],
   );
 
+  // "Reveal in Files": switch to the tree, load every ancestor folder, then
+  // hand the tree the path to scroll to once its row exists.
+  useEffect(
+    () =>
+      on('omniterm:reveal-file', ({ path }) => {
+        const root = activePathRef.current;
+        const rel = root && typeof path === 'string' ? relativeTo(root, path) : null;
+        if (!rel) return;
+        emit('omniterm:show-sidebar', { section: 'files' });
+        const parts = rel.split('/');
+        const dirs = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join('/'));
+        void Promise.all(dirs.map(fetchDir)).then((loaded) => {
+          if (activePathRef.current !== root) return;
+          setExpandedDirs((prev) => {
+            const next = { ...prev };
+            dirs.forEach((d, i) => (next[d] = loaded[i]));
+            return next;
+          });
+          setReveal((prev) => ({ path: rel, seq: (prev?.seq ?? 0) + 1 }));
+        });
+      }),
+    [fetchDir],
+  );
+
   const openPreview = useCallback(
     (filePath: string) => {
       const root = activePathRef.current;
@@ -936,6 +962,7 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
             gitStatus={gitStatus}
             changesOnly={changesOnly}
             activeRelPath={activeFile?.path ?? null}
+            reveal={reveal}
             fileHandlers={fileHandlers}
             fileIndicatorPaths={fileIndicatorPaths ?? EMPTY_SET}
             host={host}

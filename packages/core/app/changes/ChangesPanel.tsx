@@ -14,7 +14,7 @@ import {
   type GitChanges,
 } from './changeRows';
 import { gitPost } from './gitStore';
-import { CheckIcon, DiscardIcon, MinusIcon, PlusIcon } from './icons';
+import { CheckIcon, DiscardIcon, MinusIcon, OpenFileIcon, PlusIcon, RevealIcon } from './icons';
 
 interface Props {
   /** The workspace path (any path inside the repo). */
@@ -67,6 +67,17 @@ export default function ChangesPanel({ cwd, changes, isMobile, closeSidebar }: P
     if (isMobile) closeSidebar();
   }
 
+  function openSource(r: ChangeRow) {
+    if (!changes) return;
+    emit('omniterm:open-file', { path: `${changes.root}/${r.path}` });
+    if (isMobile) closeSidebar();
+  }
+
+  function reveal(r: ChangeRow) {
+    if (!changes) return;
+    emit('omniterm:reveal-file', { path: `${changes.root}/${r.path}` });
+  }
+
   const stageAll = (rows: ChangeRow[]) => void mutate('stage', { paths: rows.flatMap(rowPaths) });
   const unstageAll = (rows: ChangeRow[]) => void mutate('unstage', { paths: rows.flatMap(rowPaths) });
 
@@ -85,6 +96,17 @@ export default function ChangesPanel({ cwd, changes, isMobile, closeSidebar }: P
       <span style={S.name}>{r.name}</span>
       {r.dir && <span style={S.dir}>{r.dir}</span>}
       <span className="ot-change-actions" onClick={(e) => e.stopPropagation()}>
+        {/* A deleted file has nothing on disk to open or reveal. */}
+        {r.status !== 'D' && (
+          <>
+            <button className="ot-change-act" title="Open file" aria-label="Open file" onClick={() => openSource(r)}>
+              <OpenFileIcon size={14} />
+            </button>
+            <button className="ot-change-act" title="Reveal in Files" aria-label="Reveal in Files" onClick={() => reveal(r)}>
+              <RevealIcon size={14} />
+            </button>
+          </>
+        )}
         {r.staged ? (
           <button className="ot-change-act" title="Unstage" aria-label="Unstage" disabled={busy} onClick={() => unstageAll([r])}>
             <MinusIcon size={14} />
