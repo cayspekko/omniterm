@@ -39,10 +39,13 @@ export function onTtydStopped(listener: (sessionName: string) => void): () => vo
 export function buildTtydArgs(
   sessionName: string,
   port: number,
-  settings: { terminalFontSize?: number; terminalRenderer?: string },
+  settings: { terminalFontSize?: number; terminalFontFamily?: string; terminalRenderer?: string },
 ): string[] {
   const fontSize = settings.terminalFontSize || 18;
   const renderer = settings.terminalRenderer === 'dom' ? 'dom' : 'webgl';
+  // Only override ttyd's own default font list when the user picked fonts.
+  const fontFamily =
+    typeof settings.terminalFontFamily === 'string' ? settings.terminalFontFamily.trim() : '';
   return [
     '--writable',
     '-i',
@@ -53,6 +56,9 @@ export function buildTtydArgs(
     `rendererType=${renderer}`,
     '-t',
     `fontSize=${fontSize}`,
+    // ttyd JSON-parses each value leniently: `'A B', mono` would come back as
+    // just `A B`. Pass a real JSON string so the whole list survives.
+    ...(fontFamily ? ['-t', `fontFamily=${JSON.stringify(fontFamily)}`] : []),
     '-p',
     String(port),
     '--',
