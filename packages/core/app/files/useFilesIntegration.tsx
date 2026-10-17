@@ -15,6 +15,10 @@
  * strip is a mirror kept in step by one reconcile effect (see planReconcile).
  * User opens only touch the store; the reconcile opens the host tab (and
  * activates it when the open came from the user).
+ *
+ * Window events (app/events.ts): listens for 'omniterm:open-file' (paths in the
+ * active workspace only) and 'omniterm:git-changed'; the tree emits
+ * 'omniterm:open-terminal' and 'omniterm:open-workspace'.
  */
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -27,11 +31,13 @@ import {
   type PluginIntegration,
   type Tab,
 } from '../types';
-import { FileIcon, FolderIcon, ImageIcon, PreviewIcon } from '../components/icons';
+import { BranchIcon, FileIcon, FolderIcon, ImageIcon, PreviewIcon } from '../components/icons';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { detectViewerKind } from '../../lib/previewable';
+import { emit, on } from '../events';
 import FileTree, { type DirEntry } from './FileTree';
-import FilePane, { type OpenFile } from './FilePane';
+import FilePane, { type DiffMode, type OpenFile } from './FilePane';
+import { joinRel, parentOf, relativeTo, remapPath } from './fileOps';
 import {
   FILE_TAB_TYPE,
   desiredHostTabs,
@@ -61,6 +67,9 @@ export interface UseFilesIntegrationArgs {
   host: HostApi;
   fileHandlers?: PluginIntegration['fileHandlers'];
   fileIndicatorPaths?: ReadonlySet<string>;
+  /** Show a tab in the other pane of the split view ("Open to the side").
+   *  Absent → the tree doesn't offer it. */
+  openToSide?: (tabId: string) => void;
 }
 
 /** How long a closed/removed id is shielded from reconcile re-adds while the
@@ -82,6 +91,29 @@ function blankFile(root: string, kind: FileTabKind, path: string): OpenFile {
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
 
+/** A failed request's `{error}` message (or a generic one); null when ok. */
+async function requestError(url: string, init: RequestInit): Promise<string | null> {
+  try {
+    const res = await fetch(url, init);
+    if (res.ok) return null;
+    const body = await res.json().catch(() => null);
+    return typeof body?.error === 'string' ? body.error : `Request failed (${res.status})`;
+  } catch {
+    return 'Could not reach the server';
+  }
+}
+
+function postJson(url: string, body: unknown): Promise<string | null> {
+  return requestError(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Files at or under `relPath`. */
+const under = (f: { path: string }, relPath: string) => remapPath(f.path, relPath, relPath) !== null;
+
 export function useFilesIntegration(args: UseFilesIntegrationArgs): { integration: PluginIntegration } {
   const {
     activePath,
@@ -92,6 +124,7 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
     host,
     fileHandlers,
     fileIndicatorPaths,
+    openToSide,
   } = args;
 
   // ----- store -----
@@ -118,6 +151,14 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
   hostRef.current = host;
   const activePathRef = useRef(activePath);
   activePathRef.current = activePath;
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const openToSideRef = useRef(openToSide);
+  openToSideRef.current = openToSide;
+  /** A file tab to put in the other pane once the host shows it. */
+  const pendingSideRef = useRef<string | null>(null);
   /** Ids the user just closed (or we just removed): never re-added by reconcile. */
   const suppressedRef = useRef<Map<string, number>>(new Map());
   /** Ids whose next reconcile open should activate (a user-initiated open). */
@@ -178,6 +219,29 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
       }
     },
     [activePath],
+  );
+
+  /** A diff tab's content from the git API. Never reads the file itself, so a
+   *  file deleted in the working tree shows as an empty modified side. */
+  const fetchDiff = useCallback(
+    async (root: string, filePath: string, mode: DiffMode): Promise<OpenFile | null> => {
+      const q = `cwd=${encodeURIComponent(root)}&path=${encodeURIComponent(`${root}/${filePath}`)}`;
+      try {
+        const res = await fetch(`/api/git/diff?${q}${mode === 'staged' ? '&staged=1' : ''}`);
+        if (!res.ok) return null;
+        const d = await res.json();
+        return {
+          ...blankFile(root, 'diff', filePath),
+          content: typeof d.modified === 'string' ? d.modified : '',
+          originalContent: typeof d.original === 'string' ? d.original : '',
+          language: typeof d.language === 'string' ? d.language : '',
+          diffMode: mode,
+        };
+      } catch {
+        return null;
+      }
+    },
+    [],
   );
 
   const fetchGitStatus = useCallback(async () => {
@@ -421,39 +485,39 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
 
   // ----- open / close / save -----
 
-  /** Add a file to the store and have reconcile open + activate its host tab;
-   *  if it is already open, just focus it. */
-  const showFile = useCallback((f: OpenFile) => {
+  /** Add a file to the store and have reconcile open (and, unless `activate`
+   *  is false, activate) its host tab; if it is already open, just focus it. */
+  const showFile = useCallback((f: OpenFile, activate = true) => {
     suppressedRef.current.delete(f.id);
     const existing = filesRef.current.some((x) => x.id === f.id);
     if (existing) {
-      hostRef.current.activateTab(f.id);
+      if (activate) hostRef.current.activateTab(f.id);
       return;
     }
-    activateOnOpenRef.current.add(f.id);
+    if (activate) activateOnOpenRef.current.add(f.id);
     setFiles((prev) => {
       if (prev.some((x) => x.id === f.id)) return prev;
-      if (f.kind !== 'preview') return [...prev, f];
-      // Previews sit right after their source in the store too (persist order).
+      if (f.kind === 'source') return [...prev, f];
+      // Previews and diffs sit right after their source in the store too (persist order).
       const srcIdx = prev.findIndex((x) => x.kind === 'source' && x.path === f.path);
       return srcIdx === -1 ? [...prev, f] : [...prev.slice(0, srcIdx + 1), f, ...prev.slice(srcIdx + 1)];
     });
   }, []);
 
   const openFile = useCallback(
-    async (filePath: string) => {
+    async (filePath: string, activate = true) => {
       const root = activePathRef.current;
       if (!root) return;
       const id = fileTabId(root, 'source', filePath);
       if (filesRef.current.some((f) => f.id === id)) {
-        showFile(blankFile(root, 'source', filePath));
+        showFile(blankFile(root, 'source', filePath), activate);
         return;
       }
       // Image/PDF/CSV open in a dedicated viewer that streams the raw route
       // itself — skip the text read (garbage for binary files).
       const viewerKind = detectViewerKind(filePath);
       if (viewerKind) {
-        showFile(blankFile(root, 'source', filePath));
+        showFile(blankFile(root, 'source', filePath), activate);
         track('file_opened_viewer', { kind: viewerKind });
         return;
       }
@@ -463,10 +527,85 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
         console.error(`[files] failed to open ${filePath}`);
         return;
       }
-      showFile(tab);
+      showFile(tab, activate);
       track('file_opened_editor', { language: tab.language || 'plaintext' });
     },
     [fetchSource, changesOnly, showFile],
+  );
+
+  /** "Open to the side": open the file without focusing it, then hand its
+   *  tab to the split view once the host strip has it (effect below). */
+  const openFileToSide = useCallback(
+    (filePath: string) => {
+      const root = activePathRef.current;
+      if (!root) return;
+      const id = fileTabId(root, 'source', filePath);
+      if (tabsRef.current.some((t) => t.id === id)) {
+        openToSideRef.current?.(id);
+        return;
+      }
+      pendingSideRef.current = id;
+      void openFile(filePath, false);
+    },
+    [openFile],
+  );
+
+  useEffect(() => {
+    const id = pendingSideRef.current;
+    if (!id || !tabs.some((t) => t.id === id)) return;
+    pendingSideRef.current = null;
+    openToSideRef.current?.(id);
+  }, [tabs]);
+
+  /** Open (or refresh and focus) a read-only diff tab for a file. */
+  const openDiff = useCallback(
+    async (filePath: string, mode: DiffMode) => {
+      const root = activePathRef.current;
+      if (!root) return;
+      const tab = await fetchDiff(root, filePath, mode);
+      if (activePathRef.current !== root) return;
+      if (!tab) {
+        console.error(`[files] failed to load changes for ${filePath}`);
+        return;
+      }
+      setFiles((prev) => prev.map((f) => (f.id === tab.id ? tab : f)));
+      showFile(tab);
+    },
+    [fetchDiff, showFile],
+  );
+
+  // Diff tabs show git state at one moment: re-read them when it changes.
+  const refreshDiffs = useCallback(async () => {
+    const root = activePathRef.current;
+    if (!root) return;
+    const diffs = filesRef.current.filter((f) => f.kind === 'diff');
+    const fresh = await Promise.all(diffs.map((f) => fetchDiff(root, f.path, f.diffMode ?? 'worktree')));
+    if (activePathRef.current !== root) return;
+    const byId = new Map(fresh.flatMap((t) => (t ? [[t.id, t] as const] : [])));
+    if (byId.size === 0) return;
+    setFiles((prev) => prev.map((f) => byId.get(f.id) ?? f));
+  }, [fetchDiff]);
+
+  useEffect(
+    () =>
+      on('omniterm:git-changed', () => {
+        void fetchGitStatus();
+        void refreshDiffs();
+      }),
+    [fetchGitStatus, refreshDiffs],
+  );
+
+  // Other areas (Changes list, terminal links...) open files by absolute path.
+  useEffect(
+    () =>
+      on('omniterm:open-file', ({ path, diff }) => {
+        const root = activePathRef.current;
+        const rel = root && typeof path === 'string' ? relativeTo(root, path) : null;
+        if (!rel) return;
+        if (diff) void openDiff(rel, diff);
+        else void openFile(rel);
+      }),
+    [openDiff, openFile],
   );
 
   const openPreview = useCallback(
@@ -518,6 +657,99 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
       setPreviewReload((prev) => ({ ...prev, [previewId]: (prev[previewId] ?? 0) + 1 }));
     },
     [setDirty],
+  );
+
+  // ----- file operations (tree context menu) -----
+
+  const expandDir = useCallback(
+    (dir: string) => {
+      if (expandedDirs[dir] === undefined) toggleDir(dir);
+    },
+    [expandedDirs, toggleDir],
+  );
+
+  const createEntry = useCallback(
+    async (parent: string, name: string, kind: 'file' | 'folder'): Promise<string | null> => {
+      const root = activePathRef.current;
+      if (!root) return 'No workspace';
+      const rel = joinRel(parent, name);
+      const err = await postJson(kind === 'file' ? '/api/fs/create' : '/api/fs/mkdir', {
+        path: `${root}/${rel}`,
+      });
+      if (err) return err;
+      await refreshTree();
+      if (kind === 'file') void openFile(rel);
+      return null;
+    },
+    [refreshTree, openFile],
+  );
+
+  const renameEntry = useCallback(
+    async (from: string, newName: string): Promise<string | null> => {
+      const root = activePathRef.current;
+      if (!root) return 'No workspace';
+      const to = joinRel(parentOf(from), newName);
+      const moved = filesRef.current.filter((f) => under(f, from));
+      // An open editor's unsaved edits belong to the old path; don't strand them.
+      if (moved.some((f) => f.isDirty)) return 'Save or close its open files with unsaved changes first';
+      const err = await postJson('/api/fs/rename', { from: `${root}/${from}`, to: `${root}/${to}` });
+      if (err) return err;
+      if (activePathRef.current !== root) return null;
+      // Re-key the moved tabs in place: open each new id right after its old
+      // one (keeping focus), then drop the old id.
+      const next = filesRef.current.map((f) => {
+        const p = remapPath(f.path, from, to);
+        return p === null ? f : { ...f, path: p, id: fileTabId(root, f.kind, p) };
+      });
+      const desired = new Map(desiredHostTabs(root, next).map((t) => [t.id, t]));
+      const h = hostRef.current;
+      for (const f of moved) {
+        const tab = desired.get(fileTabId(root, f.kind, remapPath(f.path, from, to)!));
+        suppress(f.id);
+        editorContentRefs.current.delete(f.id);
+        if (tab) h.openTab(tab, { after: f.id, activate: f.id === activeTabIdRef.current });
+        h.removeTab(f.id);
+      }
+      setFiles(next);
+      setExpandedDirs((prev) => {
+        const out: Record<string, DirEntry[]> = {};
+        for (const [d, entries] of Object.entries(prev)) out[remapPath(d, from, to) ?? d] = entries;
+        return out;
+      });
+      await refreshTree();
+      return null;
+    },
+    [refreshTree],
+  );
+
+  const deleteEntry = useCallback(
+    async (relPath: string): Promise<string | null> => {
+      const root = activePathRef.current;
+      if (!root) return 'No workspace';
+      const err = await requestError(`/api/fs?path=${encodeURIComponent(`${root}/${relPath}`)}`, {
+        method: 'DELETE',
+      });
+      if (err) return err;
+      if (activePathRef.current !== root) return null;
+      for (const f of filesRef.current.filter((x) => under(x, relPath))) {
+        suppress(f.id);
+        hostRef.current.removeTab(f.id);
+        dropFromStore(f.id);
+      }
+      setExpandedDirs((prev) => {
+        const out: Record<string, DirEntry[]> = {};
+        for (const [d, entries] of Object.entries(prev)) if (!under({ path: d }, relPath)) out[d] = entries;
+        return out;
+      });
+      await refreshTree();
+      return null;
+    },
+    [refreshTree, dropFromStore],
+  );
+
+  const dirtyCountUnder = useCallback(
+    (relPath: string) => filesRef.current.filter((f) => f.isDirty && under(f, relPath)).length,
+    [],
   );
 
   const rememberContent = useCallback((id: string, content: string) => {
@@ -585,6 +817,7 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
       const parsed = parseFileTabId(tab.id);
       if (!parsed) return <FileIcon size={14} />;
       if (parsed.kind === 'preview') return <PreviewIcon size={14} />;
+      if (parsed.kind === 'diff') return <BranchIcon size={14} />;
       if (detectViewerKind(parsed.absPath)) return <ImageIcon size={14} />;
       return <FileIcon size={14} />;
     },
@@ -668,7 +901,7 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
               file={f}
               dirPath={activePath}
               paneStyle={styleFor(f.id)}
-              diff={changesOnly && f.originalContent !== null}
+              diff={f.kind === 'diff' || (changesOnly && f.originalContent !== null)}
               reloadKey={previewReload[f.id]}
               onDirty={setDirty}
               onSave={save}
@@ -687,30 +920,44 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
       id: 'files',
       label: 'Files',
       icon: <FolderIcon size={16} />,
-      render: ({ isMobile: mobile, closeSidebar }: { isMobile: boolean; closeSidebar: () => void }) => (
-        <FileTree
-          rootPath={activePath}
-          tree={tree}
-          expandedDirs={expandedDirs}
-          gitStatus={gitStatus}
-          changesOnly={changesOnly}
-          activeRelPath={activeFile?.path ?? null}
-          fileHandlers={fileHandlers}
-          fileIndicatorPaths={fileIndicatorPaths ?? EMPTY_SET}
-          host={host}
-          onToggleDir={toggleDir}
-          onOpenFile={(p) => {
-            void openFile(p);
+      render: ({ isMobile: mobile, closeSidebar }: { isMobile: boolean; closeSidebar: () => void }) => {
+        // Opening something on a phone hides the overlay sidebar to show it.
+        const thenClose =
+          <A extends unknown[]>(fn: (...a: A) => void) =>
+          (...a: A) => {
+            fn(...a);
             if (mobile || isMobile) closeSidebar();
-          }}
-          onOpenPreview={(p) => {
-            openPreview(p);
-            if (mobile || isMobile) closeSidebar();
-          }}
-          onToggleChangesOnly={toggleChangesOnly}
-          onRefresh={() => void refreshTree()}
-        />
-      ),
+          };
+        return (
+          <FileTree
+            rootPath={activePath}
+            tree={tree}
+            expandedDirs={expandedDirs}
+            gitStatus={gitStatus}
+            changesOnly={changesOnly}
+            activeRelPath={activeFile?.path ?? null}
+            fileHandlers={fileHandlers}
+            fileIndicatorPaths={fileIndicatorPaths ?? EMPTY_SET}
+            host={host}
+            canSplit={!!openToSide && !(mobile || isMobile)}
+            draggable={!(mobile || isMobile)}
+            onToggleDir={toggleDir}
+            onExpandDir={expandDir}
+            onOpenFile={thenClose((p: string) => void openFile(p))}
+            onOpenPreview={thenClose(openPreview)}
+            onOpenToSide={openFileToSide}
+            onOpenDiff={thenClose((p: string, mode: DiffMode) => void openDiff(p, mode))}
+            onOpenTerminal={thenClose((cwd: string) => emit('omniterm:open-terminal', { cwd }))}
+            onOpenWorkspace={thenClose((path: string) => emit('omniterm:open-workspace', { path }))}
+            onCreate={createEntry}
+            onRename={renameEntry}
+            onDelete={deleteEntry}
+            dirtyCountUnder={dirtyCountUnder}
+            onToggleChangesOnly={toggleChangesOnly}
+            onRefresh={() => void refreshTree()}
+          />
+        );
+      },
     },
   ];
 

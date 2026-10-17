@@ -25,8 +25,12 @@ import {
 } from '../../app/types';
 import { track } from '../../app/telemetryClient';
 import { TerminalIcon } from '../../app/components/icons';
+import { on } from '../../app/events';
+import { FILE_PATH_DRAG_MIME, basename, isInside } from '../../app/files/fileOps';
 import TerminalView from './components/TerminalView';
 import MobileInputChrome from './components/MobileInputChrome';
+import { sendData } from './lib/terminalInput';
+import { pathDropText } from './lib/shellQuote';
 import {
   buildWarmRenderList,
   mergeRestoredTabs,
@@ -221,13 +225,12 @@ export function useTerminalIntegration(
   // ----- session creation (used by handleCreateTab) -----
 
   const createSession = useCallback(
-    async (): Promise<string | null> => {
-      if (!activePath) return null;
+    async (cwd: string): Promise<string | null> => {
       const t0 = performance.now();
       const res = await fetch('/api/create-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cwd: activePath }),
+        body: JSON.stringify({ cwd }),
       });
       if (!res.ok) return null;
       const session: SessionInfo = await res.json();
@@ -237,17 +240,41 @@ export function useTerminalIntegration(
       setSessionMap((prev) => ({ ...prev, [session.id]: session }));
       return session.id;
     },
-    [activePath],
+    [],
   );
 
   const handleCreateTab = useCallback(
     async (api: HostApi) => {
-      const sessionId = await createSession();
+      if (!activePath) return;
+      const sessionId = await createSession(activePath);
       if (!sessionId) return;
       const tab: Tab = { type: 'terminal', id: sessionId, name: `Term ${sessionId.slice(-4)}` };
       api.openTab(tab);
     },
-    [createSession],
+    [activePath, createSession],
+  );
+
+  // "Open terminal here": a terminal tab in the active workspace whose shell
+  // starts in `cwd` (named after that folder). A cwd outside the workspace is
+  // ignored — its session would be listed under another workspace.
+  useEffect(
+    () =>
+      on('omniterm:open-terminal', ({ cwd }) => {
+        const root = activePathRef.current;
+        if (!root || typeof cwd !== 'string' || !isInside(cwd, root)) return;
+        void (async () => {
+          const sessionId = await createSession(cwd);
+          if (!sessionId || activePathRef.current !== root) return;
+          const name = cwd === root ? `Term ${sessionId.slice(-4)}` : basename(cwd);
+          setTabs((prev) =>
+            prev.some((t) => t.id === sessionId)
+              ? prev
+              : [...prev, { type: 'terminal', id: sessionId, name }],
+          );
+          setActiveTabId(sessionId);
+        })();
+      }),
+    [createSession, setTabs, setActiveTabId],
   );
 
   // ----- restore + reconcile sessions on workspace activate -----
@@ -628,6 +655,39 @@ export function useTerminalIntegration(
     [],
   );
 
+  // ----- drop a file-tree path onto a terminal -----
+  // The ttyd iframe swallows drag events, so while a tree row is being dragged
+  // every visible terminal pane gets a transparent drop target on top of it.
+  const [pathDragActive, setPathDragActive] = useState(false);
+  const [dropTabId, setDropTabId] = useState<string | null>(null);
+  useEffect(() => {
+    const onStart = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes(FILE_PATH_DRAG_MIME)) setPathDragActive(true);
+    };
+    const onEnd = () => {
+      setPathDragActive(false);
+      setDropTabId(null);
+    };
+    window.addEventListener('dragstart', onStart);
+    window.addEventListener('dragend', onEnd);
+    window.addEventListener('drop', onEnd);
+    return () => {
+      window.removeEventListener('dragstart', onStart);
+      window.removeEventListener('dragend', onEnd);
+      window.removeEventListener('drop', onEnd);
+    };
+  }, []);
+  /** Type the shell-quoted path at the prompt (not run) and focus that terminal. */
+  const pastePath = useCallback(
+    (sessionId: string, absPath: string) => {
+      const iframe = iframesBySession.current.get(sessionId);
+      if (!sendData(iframe?.contentWindow, pathDropText(absPath))) return;
+      setActiveTabId(sessionId);
+      iframe?.focus();
+    },
+    [setActiveTabId],
+  );
+
   const renderTerminalLayer = useCallback(
     (state: IframeTabsLayerState): ReactNode => {
       const { activeTabId } = state;
@@ -732,6 +792,26 @@ export function useTerminalIntegration(
                       pointerEvents: 'auto',
                     }}
                   >
+                    {session && pathDragActive && paneStyle && (
+                      <div
+                        className="ot-terminal-drop"
+                        data-over={dropTabId === tab.id ? 'true' : undefined}
+                        onDragOver={(e) => {
+                          if (!e.dataTransfer.types.includes(FILE_PATH_DRAG_MIME)) return;
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          if (dropTabId !== tab.id) setDropTabId(tab.id);
+                        }}
+                        onDragLeave={(e) => {
+                          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropTabId(null);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const p = e.dataTransfer.getData(FILE_PATH_DRAG_MIME);
+                          if (p) pastePath(session.id, p);
+                        }}
+                      />
+                    )}
                     {session ? (
                       <TerminalView
                         sessionId={session.id}
@@ -782,6 +862,9 @@ export function useTerminalIntegration(
       isMobile,
       iframeRefFor,
       resolveTerminalWindow,
+      pathDragActive,
+      dropTabId,
+      pastePath,
     ],
   );
 

@@ -175,3 +175,25 @@ test('tree helpers: glob, dir colours, changed sets', () => {
   assert.deepStrictEqual([...files], ['a/b/c.ts']);
   assert.deepStrictEqual([...dirs], ['a', 'a/b']);
 });
+
+test('diff tabs: own id and label, opened after their source, never persisted', () => {
+  const diffId = fileTabId(ROOT, 'diff', 'a.ts');
+  assert.deepStrictEqual(parseFileTabId(diffId), { kind: 'diff', absPath: '/ws/repo/a.ts' });
+  const desired = desiredHostTabs(ROOT, [
+    { path: 'a.ts', kind: 'source', isDirty: false },
+    { path: 'a.ts', kind: 'diff', isDirty: false },
+  ]);
+  assert.strictEqual(desired[1].name, 'a.ts (diff)');
+  assert.strictEqual(desired[1].title, 'Changes: a.ts');
+  const plan = planReconcile({ desired, hostTabs: [term], pruneStale: true });
+  assert.strictEqual(plan.open[1].after, 'file:source:/ws/repo/a.ts');
+
+  const s = serializePersisted(
+    [
+      { path: 'a.ts', kind: 'source' },
+      { path: 'a.ts', kind: 'diff' },
+    ],
+    { path: 'a.ts', kind: 'diff' },
+  );
+  assert.deepStrictEqual(s, { open: [{ path: 'a.ts', kind: 'source' }], active: null });
+});

@@ -17,6 +17,7 @@ import { useManifestIntegration } from '../app/manifestPlugins';
 import { useBrowserIntegration } from '../browserRegistry/useBrowserIntegration';
 import { useFilesIntegration } from '../app/files/useFilesIntegration';
 import { useChangesIntegration } from '../app/changes/useChangesIntegration';
+import { openToSide } from '../app/splitView';
 
 function App() {
   // See apps/testbox/client/main.tsx for why we route through a ref:
@@ -64,6 +65,8 @@ function App() {
     host: homeState.hostApi,
     fileHandlers: preFiles.fileHandlers,
     fileIndicatorPaths: preFiles.fileIndicatorPaths,
+    openToSide: (tabId) =>
+      homeState.applySplit((split, active, ids) => openToSide(split, active, ids, tabId)),
   });
 
   // Git changes: the sidebar's Changes section (only inside a git repo).
