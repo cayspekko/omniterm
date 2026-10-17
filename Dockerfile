@@ -9,15 +9,10 @@ RUN pnpm install --frozen-lockfile
 # `pnpm pack` runs prepack (scripts/package.sh) and rewrites workspace:* deps.
 RUN cd apps/omniterm && pnpm pack --pack-destination /out
 
-# ---- Runtime ----
-FROM node:24-bookworm-slim
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      tmux chromium xvfb git curl ca-certificates procps less vim-tiny \
-      fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji fonts-liberation \
- && rm -rf /var/lib/apt/lists/*
-
-# ttyd isn't packaged in bookworm; use the upstream static binary.
+# ---- ttyd: not packaged in bookworm; use the upstream static binary ----
+# Its own stage so curl never reaches the runtime images.
+FROM node:24-bookworm-slim AS ttyd
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
 RUN case "$TARGETARCH" in \
@@ -25,8 +20,21 @@ RUN case "$TARGETARCH" in \
     esac \
  && curl -fsSL -o /usr/local/bin/ttyd \
       "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${a}" \
- && chmod 755 /usr/local/bin/ttyd \
- && ttyd --version
+ && chmod 755 /usr/local/bin/ttyd
+
+# ---- base: the minimum omniterm needs to run ----
+#   docker build --target base -t omniterm:base .
+# tmux + ttyd for terminals; git for repos/worktrees (ca-certificates so it can
+# clone over https); procps for the orphaned-ttyd sweep; Chrome on a virtual
+# display plus fonts so pages render. Terminals get bash and nothing else.
+FROM node:24-bookworm-slim AS base
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      tmux chromium xvfb git ca-certificates procps \
+      fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji fonts-liberation \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=ttyd /usr/local/bin/ttyd /usr/local/bin/ttyd
+RUN ttyd --version
 
 # omniterm-browser honours OMNITERM_CHROME_PATH, so point it at a wrapper that:
 #  - disables Chrome's sandbox, which can't start in an unprivileged container;
@@ -66,13 +74,15 @@ exec "$@"
 EOF
 RUN chmod 755 /usr/local/bin/omniterm-entrypoint
 
-# Terminals start from a scrubbed env; let these through to them.
+# Terminals start from a scrubbed env; let these through to them (LANG is
+# always let through). Without a UTF-8 LANG, shells draw non-ASCII as `?`.
 ENV DISPLAY=:99 \
     OMNITERM_CHROME_PATH=/usr/local/bin/chromium-nosandbox \
     OMNITERM_ENV_PASSTHROUGH=DISPLAY,TZ,OMNITERM_CHROME_PATH,OMNITERM_BROWSER_WINDOW_SIZE,OMNITERM_BROWSER_SCALE \
     OMNITERM_HOST=0.0.0.0 \
     OMNITERM_PORT=17717 \
-    SHELL=/bin/bash
+    SHELL=/bin/bash \
+    LANG=C.UTF-8
 
 # omniterm only browses files under $HOME, so run as a normal user.
 USER node
@@ -81,3 +91,39 @@ RUN mkdir -p /home/node/.omniterm /home/node/work
 EXPOSE 17717
 ENTRYPOINT ["/usr/local/bin/omniterm-entrypoint"]
 CMD ["omniterm"]
+
+# ---- workstation: base plus a comfortable shell (the default target) ----
+#   docker build -t omniterm:local .
+# zsh + Oh My Zsh, an ssh client, vim and curl.
+FROM base AS workstation
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends zsh openssh-client vim less curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# Oh My Zsh, fetched at build time so the container needs no network to set
+# a shell up. The entrypoint copies it into $HOME on first start.
+ARG OHMYZSH_REF=master
+RUN git clone --depth 1 --branch "$OHMYZSH_REF" https://github.com/ohmyzsh/ohmyzsh.git /usr/local/share/oh-my-zsh \
+ && chmod -R a+rX /usr/local/share/oh-my-zsh
+
+# Seed $HOME the first time (never overwrites yours), then hand off to the
+# base entrypoint. Without a .zshrc, zsh opens its new-user wizard in every
+# terminal.
+COPY <<'EOF' /usr/local/bin/omniterm-workstation-entrypoint
+#!/bin/sh
+if [ ! -d "$HOME/.oh-my-zsh" ]; then
+  cp -R /usr/local/share/oh-my-zsh "$HOME/.oh-my-zsh" || echo "omniterm: could not install Oh My Zsh into $HOME" >&2
+fi
+if [ ! -f "$HOME/.zshrc" ] && [ -f "$HOME/.oh-my-zsh/templates/zshrc.zsh-template" ]; then
+  cp "$HOME/.oh-my-zsh/templates/zshrc.zsh-template" "$HOME/.zshrc" || true
+fi
+exec /usr/local/bin/omniterm-entrypoint "$@"
+EOF
+RUN chmod 755 /usr/local/bin/omniterm-workstation-entrypoint
+
+# zsh is node's login shell too, so tools that read it (and $SHELL) agree.
+RUN usermod -s /bin/zsh node
+ENV SHELL=/bin/zsh
+USER node
+ENTRYPOINT ["/usr/local/bin/omniterm-workstation-entrypoint"]

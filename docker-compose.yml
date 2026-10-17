@@ -14,7 +14,11 @@ x-omniterm-env: &omniterm-env
 
 services:
   omniterm:
-    build: .
+    # `workstation` = the minimal `base` stage plus zsh/Oh My Zsh, ssh and vim.
+    # Use `target: base` for just what omniterm needs to run.
+    build:
+      context: .
+      target: workstation
     image: omniterm:local
     container_name: omniterm
     # omniterm has no auth of its own — bind to loopback only. Change to
