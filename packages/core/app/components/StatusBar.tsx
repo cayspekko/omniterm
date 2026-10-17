@@ -85,6 +85,10 @@ const S: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
   },
   item: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    minWidth: 0,
     padding: '0 4px',
     overflow: 'hidden',
     textOverflow: 'ellipsis',

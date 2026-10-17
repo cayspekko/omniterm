@@ -174,7 +174,9 @@ export default function OpenPicker({ workspaces, onOpen, onClone, onClose }: Pro
               ref={inputRef}
               className={styles.input}
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              // Typing an absolute path over the `~/` starting point gives `~//x`:
+              // read that as `/x`.
+              onChange={(e) => setQuery(e.target.value.replace(/^~\/\//, '/'))}
               onKeyDown={onPathKeyDown}
               placeholder="Folder path, e.g. ~/git/project"
               aria-label="Folder path"
