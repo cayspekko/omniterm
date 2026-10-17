@@ -1,13 +1,50 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import WorkspacePanel, { WorkspaceHeaderActions } from './components/WorkspacePanel';
-import TabBar, { renderTabIcon, type CreateMenuEntry } from './components/TabBar';
+import TabBar, { renderTabIcon, type CreateMenuEntry, type TabMenuItem } from './components/TabBar';
 import Sidebar, { WORKSPACES_SECTION } from './components/Sidebar';
 import SettingsPanel from './components/SettingsPanel';
 import ConfirmDialog from './components/ConfirmDialog';
 import { SettingsIcon, SidebarIcon } from './components/icons';
-import type { HostApi, MainContentContext, SidebarPanel, Tab } from './types';
+import type {
+  HostApi,
+  IframeTabsLayerState,
+  MainContentContext,
+  SidebarPanel,
+  Tab,
+} from './types';
+import { FULL_PANE_STYLE } from './types';
+import { ResizeHandle } from './components/ResizeHandle';
+import {
+  MIN_SPLIT_CONTENT_WIDTH,
+  activeAfterRemoval,
+  clampRatio,
+  closeSplit,
+  focusPane,
+  followActive,
+  moveToOtherSide,
+  openToSide,
+  resolvePanes,
+  selectTab,
+  sideOf,
+  type PaneSide,
+  parseSplitViews,
+  restoreSplit,
+  singlePane,
+  toPersisted,
+  type PersistedSplit,
+  type SplitResult,
+  type SplitState,
+} from './splitView';
 import { shouldResetWorkspaceTabs } from './workspaceSelection';
 import { worktreeDeleteUrl, worktreeStatusUrl, probeIsDirty } from './worktreeDelete';
 import { initClientTelemetry, track } from './telemetryClient';
@@ -26,9 +63,11 @@ export type {
   Tab,
   PluginIntegration,
   MainContentContext,
+  IframeTabsLayerState,
+  PaneSide,
   SidebarPanel,
 } from './types';
-export { composeIntegrations } from './types';
+export { composeIntegrations, FULL_PANE_STYLE, paneStyleResolver } from './types';
 export type {
   WorkspacesPanelMode,
   FilesPanelMode,
@@ -84,6 +123,16 @@ export interface HomeState {
   refreshWorkspaces: () => Promise<void>;
 
   // Host-internal (consumed by Home itself; integrations should ignore)
+  /** Side-by-side split of the content area (see app/splitView.ts). The
+   *  focused pane always shows `activeTabId`. */
+  split: SplitState;
+  /** Apply a split transition: `fn` gets the current split, active tab and
+   *  strip ids and returns the next split + active tab, set together. */
+  applySplit: (
+    fn: (split: SplitState, activeTabId: string | null, tabIds: string[]) => SplitResult,
+  ) => void;
+  /** Divider drag: set the ratio without other side effects. */
+  setSplitRatio: (ratio: number) => void;
   repos: RepoInfo[];
   worktreesByRepo: Record<string, WorktreeInfo[]>;
   activeWorktree: WorktreeInfo | null;
@@ -173,6 +222,7 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
   } | null>(null);
   const [worktreeDeleteError, setWorktreeDeleteError] = useState<string | null>(null);
   const [isMobile, setIsMobile] = useState(false);
+  const [split, setSplit] = useState<SplitState>(() => singlePane());
 
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < MOBILE_MAX_WIDTH);
@@ -189,6 +239,10 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
   activePathRef.current = activePath;
   const tabOrderRef = useRef<TabOrders>({});
   const persistedTabOrderRef = useRef<TabOrders>({});
+  const splitRef = useRef(split);
+  splitRef.current = split;
+  /** Saved split per workspace (from settings, then from our own writes). */
+  const splitByPathRef = useRef<Record<string, PersistedSplit>>({});
 
   const setTabs = useCallback<React.Dispatch<React.SetStateAction<Tab[]>>>((update) => {
     setTabsRaw((prev) => {
@@ -217,7 +271,11 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
         if (!prev.some((t) => t.id === id)) return prev;
         forgetTabPosition(id);
         const neighbour = neighbourAfterRemoval(prev, id);
-        setActiveTabId((cur) => (cur === id ? neighbour : cur));
+        // In a split, closing the focused tab focuses the other pane; the
+        // split itself collapses in the followActive effect.
+        const ids = prev.map((t) => t.id);
+        const curSplit = splitRef.current;
+        setActiveTabId((cur) => activeAfterRemoval(curSplit, cur, ids, id, neighbour));
         return prev.filter((t) => t.id !== id);
       });
     },
@@ -269,6 +327,7 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
         if (data.activeTabId) setActiveTabId(data.activeTabId);
         // Legacy `workspacePanelState` / `filesPanelMode` / `browserPanelMode`
         // (side-panel era) are deliberately ignored.
+        splitByPathRef.current = parseSplitViews(data.splitView);
         const orders = parseTabOrders(data.tabOrder);
         tabOrderRef.current = orders;
         persistedTabOrderRef.current = orders;
@@ -358,6 +417,130 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
         if (persistedTabOrderRef.current[path] === merged) delete persistedTabOrderRef.current[path];
       });
   }, [settingsHydrated, activePath, tabs]);
+
+  // ----- split view: per-workspace reset, async restore, persistence -----
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
+  /** A saved split waiting for its tabs to restore. */
+  const pendingSplitRef = useRef<{ path: string; saved: PersistedSplit } | null>(null);
+  /** Last activeTabId the followActive effect saw (or a split transition set). */
+  const lastActiveRef = useRef(activeTabId);
+  /** Set split + active tab together, keeping the refs the effects below
+   *  compare against in step (so they never read the update as external). */
+  const commitSplit = useCallback((r: SplitResult) => {
+    splitRef.current = r.split;
+    lastActiveRef.current = r.activeTabId;
+    activeTabIdRef.current = r.activeTabId;
+    setSplit(r.split);
+    setActiveTabId(r.activeTabId);
+  }, []);
+  /** Bumped when a pending restore is abandoned, so persistence re-runs. */
+  const [splitRestoreEpoch, setSplitRestoreEpoch] = useState(0);
+
+  useEffect(() => {
+    const saved = activePath ? splitByPathRef.current[activePath] : undefined;
+    const reset = singlePane(saved?.ratio);
+    // Ref first: effects later in this commit still hold the previous
+    // workspace's split and must see it as stale (see the persist effect).
+    splitRef.current = reset;
+    setSplit(reset);
+    if (!activePath || !saved?.secondaryTabId) {
+      pendingSplitRef.current = null;
+      return;
+    }
+    const pending = { path: activePath, saved };
+    pendingSplitRef.current = pending;
+    // Give slow restores (browser pages come back via registry polling) a
+    // while, then drop the split: its tab is not coming back.
+    const timer = setTimeout(() => {
+      if (pendingSplitRef.current !== pending) return;
+      pendingSplitRef.current = null;
+      setSplitRestoreEpoch((n) => n + 1);
+    }, 15_000);
+    return () => clearTimeout(timer);
+  }, [activePath]);
+
+  useEffect(() => {
+    const pending = pendingSplitRef.current;
+    if (!pending || pending.path !== activePath) return;
+    const r = restoreSplit(
+      pending.saved,
+      activeTabId,
+      tabs.map((t) => t.id),
+    );
+    if (r === 'wait') return;
+    pendingSplitRef.current = null;
+    commitSplit(r);
+  }, [activePath, tabs, activeTabId]);
+
+  // Keep the split consistent when activeTabId / tabs change outside a split
+  // transition (integration activateTab, removals, prunes).
+  useEffect(() => {
+    // A split transition was committed after this render; the next render's
+    // run sees it (reading this render's values now would undo it).
+    if (activeTabId !== activeTabIdRef.current) return;
+    const prev = lastActiveRef.current;
+    lastActiveRef.current = activeTabId;
+    const ids = tabs.map((t) => t.id);
+    setSplit((s) => followActive(s, prev, activeTabId, ids));
+  }, [activeTabId, tabs]);
+
+  const applySplit = useCallback<HomeState['applySplit']>((fn) => {
+    const r = fn(
+      splitRef.current,
+      activeTabIdRef.current,
+      tabsRef.current.map((t) => t.id),
+    );
+    // A user arrangement supersedes a restore still waiting for its tabs.
+    pendingSplitRef.current = null;
+    commitSplit(r);
+  }, [commitSplit]);
+
+  const setSplitRatio = useCallback((ratio: number) => {
+    setSplit((s) => (s.ratio === ratio ? s : { ...s, ratio }));
+  }, []);
+
+  const lastPersistedSplitRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    if (!settingsHydrated || !activePath || isResizing) return;
+    if (pendingSplitRef.current?.path === activePath) return;
+    // Stale render: a newer split is already committed and will run this again.
+    if (split !== splitRef.current || activeTabId !== activeTabIdRef.current) return;
+    const entry = toPersisted(
+      split,
+      activeTabId,
+      tabs.map((t) => t.id),
+    );
+    const serialized = JSON.stringify(entry);
+    const savedBefore = splitByPathRef.current[activePath];
+    splitByPathRef.current = { ...splitByPathRef.current, [activePath]: entry };
+    // First look at this workspace: compare with what is on disk (or the
+    // default), so merely visiting a workspace writes nothing.
+    const baseline =
+      lastPersistedSplitRef.current[activePath] ??
+      JSON.stringify(savedBefore ?? toPersisted(singlePane(), null, []));
+    if (baseline === serialized) {
+      lastPersistedSplitRef.current[activePath] = serialized;
+      return;
+    }
+    lastPersistedSplitRef.current[activePath] = serialized;
+    const path = activePath;
+    fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ splitView: { [path]: entry } }),
+    })
+      .then((res) => {
+        if (!res.ok && lastPersistedSplitRef.current[path] === serialized)
+          delete lastPersistedSplitRef.current[path];
+      })
+      .catch(() => {
+        if (lastPersistedSplitRef.current[path] === serialized)
+          delete lastPersistedSplitRef.current[path];
+      });
+  }, [settingsHydrated, activePath, split, activeTabId, tabs, isResizing, splitRestoreEpoch]);
 
   const hostApi: HostApi = useMemo(
     () => ({
@@ -594,6 +777,9 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     isMobile,
     settingsHydrated,
     refreshWorkspaces,
+    split,
+    applySplit,
+    setSplitRatio,
     repos,
     worktreesByRepo,
     activeWorktree,
@@ -655,8 +841,8 @@ export interface HomeProps {
    * integrations contribute via `composeIntegrations(...)`.
    */
   mainContent?: (ctx: MainContentContext) => ReactNode;
-  /** Render slot for the iframe overlay. */
-  iframeTabsLayer?: (state: { activeTabId: string | null }) => ReactNode;
+  /** Render slot for the iframe overlay (pane-aware: see `paneStyleFor`). */
+  iframeTabsLayer?: (state: IframeTabsLayerState) => ReactNode;
   /** @deprecated The file tree is an integration-owned sidebar panel now; the
    *  files integration consumes these. Accepted (and ignored) so a spread of
    *  `composeIntegrations(...)` still type-checks. */
@@ -968,6 +1154,186 @@ export default function Home(props: HomeProps) {
 
   const activeTab = host.tabs.find((t) => t.id === host.activeTabId) ?? null;
 
+  // ----- split view layout -----
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [contentWidth, setContentWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    setContentWidth(el.clientWidth);
+    if (typeof ResizeObserver !== 'function') return;
+    const observer = new ResizeObserver(() => setContentWidth(el.clientWidth));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  // Mobile / narrow windows: no split UI, only the focused pane (the split
+  // state is kept, so it comes back when the window widens).
+  const splitAllowed = !host.isMobile && contentWidth >= MIN_SPLIT_CONTENT_WIDTH;
+  const tabIds = useMemo(() => host.tabs.map((t) => t.id), [host.tabs]);
+  const panes = resolvePanes(host.split, host.activeTabId, tabIds);
+  const splitShown = splitAllowed && panes.secondary !== null;
+  const ratioPct = Math.round(clampRatio(host.split.ratio) * 10000) / 100;
+
+  /** Visible panes and their boxes. Style objects are memoised on the layout
+   *  so memo'd panes (FilePane) only re-render when it really changes. */
+  const layout = useMemo(() => {
+    const boxes = new Map<string, { side: PaneSide; style: React.CSSProperties }>();
+    if (splitShown && panes.primary && panes.secondary) {
+      boxes.set(panes.primary, {
+        side: 'primary',
+        style: { position: 'absolute', top: 0, bottom: 0, left: 0, right: `calc(${100 - ratioPct}% + 1px)` },
+      });
+      boxes.set(panes.secondary, {
+        side: 'secondary',
+        style: { position: 'absolute', top: 0, bottom: 0, left: `calc(${ratioPct}% + 1px)`, right: 0 },
+      });
+    } else if (host.activeTabId) {
+      boxes.set(host.activeTabId, { side: panes.focused, style: FULL_PANE_STYLE });
+    }
+    return boxes;
+  }, [splitShown, panes.primary, panes.secondary, panes.focused, ratioPct, host.activeTabId]);
+
+  const paneStyleFor = useCallback((tabId: string) => layout.get(tabId)?.style ?? null, [layout]);
+  const sideBoxStyle = (side: PaneSide): React.CSSProperties => {
+    for (const box of layout.values()) if (box.side === side) return box.style;
+    return FULL_PANE_STYLE;
+  };
+
+  const { applySplit } = host;
+  const handleSelectTab = useCallback(
+    (tabId: string) => applySplit((sp, active, ids) => selectTab(sp, active, ids, tabId)),
+    [applySplit],
+  );
+  const handleFocusPane = useCallback(
+    (side: PaneSide) => applySplit((sp, active, ids) => focusPane(sp, active, ids, side)),
+    [applySplit],
+  );
+
+  // Focus follows the pane the user works in. Clicks inside an iframe
+  // (terminal, DevTools, preview) never reach this document, so watch for the
+  // focus moving INTO an iframe: the window blurs and `activeElement` becomes
+  // that iframe. Focus can then hop between iframes without another blur, so
+  // poll activeElement while the window is blurred.
+  const splitShownRef = useRef(splitShown);
+  splitShownRef.current = splitShown;
+  const ratioRef = useRef(host.split.ratio);
+  ratioRef.current = host.split.ratio;
+  useEffect(() => {
+    if (!splitShown) return;
+    const sideAtX = (clientX: number): PaneSide | null => {
+      const el = contentRef.current;
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0) return null;
+      return clientX - r.left < r.width * clampRatio(ratioRef.current) ? 'primary' : 'secondary';
+    };
+    let lastFrame: Element | null = null;
+    const checkActiveElement = () => {
+      const el = document.activeElement;
+      if (el === lastFrame) return;
+      lastFrame = el;
+      if (!(el instanceof HTMLIFrameElement) || !contentRef.current?.contains(el)) return;
+      const b = el.getBoundingClientRect();
+      const side = sideAtX(b.left + b.width / 2);
+      if (side) handleFocusPane(side);
+    };
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const onBlur = () => {
+      setTimeout(checkActiveElement, 0);
+      if (!poll) poll = setInterval(checkActiveElement, 250);
+    };
+    const onFocus = () => {
+      if (poll) clearInterval(poll);
+      poll = null;
+      lastFrame = document.activeElement;
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Element | null;
+      if (!target || !contentRef.current?.contains(target)) return;
+      if (target.closest('.ot-split-divider')) return;
+      const side = sideAtX(e.clientX);
+      if (side) handleFocusPane(side);
+    };
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    if (!document.hasFocus()) onBlur();
+    return () => {
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      if (poll) clearInterval(poll);
+    };
+  }, [splitShown, handleFocusPane]);
+
+  // ----- divider drag -----
+  const dragRectRef = useRef<DOMRect | null>(null);
+  const handleDividerStart = useCallback(() => {
+    dragRectRef.current = contentRef.current?.getBoundingClientRect() ?? null;
+    host.setIsResizing(true);
+  }, [host]);
+  const handleDividerDrag = useCallback(
+    ({ x }: { x: number }) => {
+      const r = dragRectRef.current;
+      if (!r || r.width <= 0) return;
+      host.setSplitRatio(clampRatio((x - r.left) / r.width));
+    },
+    [host],
+  );
+  const handleDividerEnd = useCallback(() => {
+    dragRectRef.current = null;
+    host.setIsResizing(false);
+  }, [host]);
+
+  // ----- tab drag onto the content area -----
+  const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
+  const [dropSide, setDropSide] = useState<PaneSide | null>(null);
+  const showDropOverlay = splitAllowed && draggingTabId !== null && host.tabs.length >= 2;
+  const dropSideAt = (e: React.DragEvent<HTMLDivElement>): PaneSide => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return e.clientX - r.left < r.width / 2 ? 'primary' : 'secondary';
+  };
+
+  const tabMenu = useCallback(
+    (tab: Tab): TabMenuItem[] => {
+      const items: TabMenuItem[] = [];
+      if (splitAllowed) {
+        const visibleSide = splitShown ? sideOf(panes, tab.id) : null;
+        if (visibleSide) {
+          items.push({
+            label: 'Move to other side',
+            onSelect: () =>
+              host.applySplit((sp, active, ids) => moveToOtherSide(sp, active, ids, tab.id)),
+          });
+        } else {
+          items.push({
+            label: 'Open to the side',
+            disabled: host.tabs.length < 2,
+            onSelect: () =>
+              host.applySplit((sp, active, ids) => openToSide(sp, active, ids, tab.id)),
+          });
+        }
+        if (splitShown) {
+          items.push({
+            label: 'Close split',
+            onSelect: () => host.applySplit((sp, active) => closeSplit(sp, active)),
+          });
+        }
+      }
+      if (items.length > 0) {
+        items.push({ label: 'Close tab', separatorBefore: true, onSelect: () => void handleCloseTab(tab.id) });
+      }
+      return items;
+    },
+    [splitAllowed, splitShown, panes, host, handleCloseTab],
+  );
+
+  const visiblePanes = [...layout.entries()]
+    .map(([tabId, box]) => ({ tabId, ...box, tab: host.tabs.find((t) => t.id === tabId) ?? null }))
+    // Stable DOM order (by id, not by side): moving a keyed element in the DOM
+    // reloads any iframe inside it, so swapping sides must only change styles.
+    .sort((a, b) => (a.tabId < b.tabId ? -1 : a.tabId > b.tabId ? 1 : 0));
+
   const emptyState = (() => {
     if (activeTab || host.tabs.length > 0) return null;
     // Restoring: integrations will add tabs shortly; don't flash a prompt.
@@ -1026,11 +1392,20 @@ export default function Home(props: HomeProps) {
         <TabBar
           tabs={host.tabs}
           activeTabId={host.activeTabId}
+          secondaryTabId={
+            splitShown ? (panes.focused === 'primary' ? panes.secondary : panes.primary) : null
+          }
+          tabMenu={tabMenu}
+          onTabDragStart={(id) => setDraggingTabId(id)}
+          onTabDragEnd={() => {
+            setDraggingTabId(null);
+            setDropSide(null);
+          }}
           alertedTabIds={alertedTabIdSet}
           compact={host.isMobile}
           leftAction={topBarLeft}
           rightAction={topBarRight}
-          onSelect={host.setActiveTabId}
+          onSelect={handleSelectTab}
           onClose={(id) => void handleCloseTab(id)}
           createMenu={createMenu}
           tabIcon={tabIcon}
@@ -1044,10 +1419,77 @@ export default function Home(props: HomeProps) {
             });
           }}
         />
-        <div style={S.content}>
+        <div ref={contentRef} style={S.content}>
           {host.isResizing && <div style={S.resizeShield} />}
-          {activeTab ? mainContent?.({ activeTab, browserPanelOpen: false }) ?? null : emptyState}
-          {iframeTabsLayer?.({ activeTabId: host.activeTabId })}
+          {activeTab
+            ? visiblePanes.map(({ tabId, tab, side, style }) =>
+                tab ? (
+                  <div key={tabId} data-pane={side} style={{ ...style, display: 'flex', minWidth: 0 }}>
+                    {mainContent?.({
+                      activeTab: tab,
+                      browserPanelOpen: false,
+                      pane: side,
+                      focused: tabId === host.activeTabId,
+                      resizing: host.isResizing,
+                    }) ?? null}
+                  </div>
+                ) : null,
+              )
+            : emptyState}
+          {iframeTabsLayer?.({ activeTabId: host.activeTabId, paneStyleFor })}
+          {splitShown && (
+            <>
+              <div
+                aria-hidden
+                style={{ ...sideBoxStyle(panes.focused), ...S.focusOutline }}
+              />
+              <div style={{ ...S.dividerLine, left: `calc(${ratioPct}% - 1px)` }} />
+              <ResizeHandle
+                axis="x"
+                variant="edge"
+                grip="hover"
+                style={{ left: `calc(${ratioPct}% - 3px)`, zIndex: 20 }}
+                onStart={handleDividerStart}
+                onDrag={handleDividerDrag}
+                onEnd={handleDividerEnd}
+                className="ot-split-divider"
+              />
+            </>
+          )}
+          {showDropOverlay && (
+            <div
+              style={S.dropOverlay}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                const side = dropSideAt(e);
+                if (side !== dropSide) setDropSide(side);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropSide(null);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                const id = draggingTabId;
+                const side = dropSideAt(e);
+                setDraggingTabId(null);
+                setDropSide(null);
+                if (id) host.applySplit((sp, active, ids) => openToSide(sp, active, ids, id, side));
+              }}
+            >
+              {dropSide && (
+                <div
+                  style={{
+                    ...S.dropHint,
+                    left: dropSide === 'primary' ? 0 : '50%',
+                    right: dropSide === 'primary' ? '50%' : 0,
+                  }}
+                >
+                  {dropSide === 'primary' ? 'Open on the left' : 'Open on the right'}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </main>
 
@@ -1136,6 +1578,40 @@ const S: Record<string, React.CSSProperties> = {
     position: 'absolute',
     inset: 0,
     zIndex: 10,
+  },
+  focusOutline: {
+    pointerEvents: 'none',
+    zIndex: 15,
+    boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--link) 55%, transparent)',
+  },
+  dividerLine: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: '2px',
+    background: 'var(--border)',
+    zIndex: 16,
+    pointerEvents: 'none',
+  },
+  dropOverlay: {
+    position: 'absolute',
+    inset: 0,
+    zIndex: 30,
+  },
+  dropHint: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    margin: '6px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: '4px',
+    border: '1px dashed var(--link)',
+    background: 'color-mix(in srgb, var(--link) 14%, transparent)',
+    color: 'var(--text-bright)',
+    fontSize: '12px',
+    pointerEvents: 'none',
   },
   empty: {
     flex: 1,

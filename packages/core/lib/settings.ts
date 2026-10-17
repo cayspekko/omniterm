@@ -95,6 +95,21 @@ export interface Settings {
    * lands in place; closing a tab drops its id.
    */
   tabOrder: Record<string, string[]>;
+  /**
+   * Per-workspace side-by-side split of the content area. `secondaryTabId`
+   * null = one pane (the ratio is still remembered). `primaryTabId` is the
+   * left tab; `focused` is the side showing the active tab. Restored once the
+   * tabs exist (they restore asynchronously); dropped if they never appear.
+   */
+  splitView: Record<
+    string,
+    {
+      secondaryTabId: string | null;
+      primaryTabId?: string | null;
+      ratio: number;
+      focused: 'primary' | 'secondary';
+    }
+  >;
   /** Selected left-sidebar section: "workspaces" or a plugin panel id. */
   sidebarSection: string;
   /**
@@ -130,6 +145,7 @@ const DEFAULT_SETTINGS: Settings = {
   browserInspectorPosition: 'hidden',
   filePanelTabs: {},
   tabOrder: {},
+  splitView: {},
   sidebarSection: 'workspaces',
   telemetryEnabled: true,
   terminalRenderer: 'webgl',
@@ -268,6 +284,9 @@ export function saveSettings(partial: Partial<Settings>): Settings {
   }
   if (partial.tabOrder) {
     updated.tabOrder = { ...current.tabOrder, ...partial.tabOrder };
+  }
+  if (partial.splitView) {
+    updated.splitView = { ...current.splitView, ...partial.splitView };
   }
   if (partial.workspacePanelState) {
     updated.workspacePanelState = {

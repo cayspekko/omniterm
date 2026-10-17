@@ -14,8 +14,15 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { Dispatch, ReactNode, SetStateAction } from 'react';
-import type { HostApi, PluginIntegration, Tab } from '../../app/types';
+import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react';
+import {
+  FULL_PANE_STYLE,
+  paneStyleResolver,
+  type HostApi,
+  type IframeTabsLayerState,
+  type PluginIntegration,
+  type Tab,
+} from '../../app/types';
 import { track } from '../../app/telemetryClient';
 import { TerminalIcon } from '../../app/components/icons';
 import TerminalView from './components/TerminalView';
@@ -622,7 +629,11 @@ export function useTerminalIntegration(
   );
 
   const renderTerminalLayer = useCallback(
-    ({ activeTabId }: { activeTabId: string | null }): ReactNode => {
+    (state: IframeTabsLayerState): ReactNode => {
+      const { activeTabId } = state;
+      // Where each visible tab renders (one pane, or two in a split view);
+      // null = hidden but kept mounted.
+      const styleFor = paneStyleResolver(state);
       // The active workspace's live state is the "flat" snapshot; every other
       // warm workspace renders from its parked snapshot in `byPath`. Rendering
       // them all through one path-keyed loop (visibility toggled via `display`)
@@ -641,26 +652,30 @@ export function useTerminalIntegration(
       });
       if (renderList.length === 0) return null;
 
-      // A browser page / file / plugin tab is in front: hide every terminal
-      // pane (they stay mounted, so they stay warm) and let clicks through to
-      // that tab's content underneath this layer. An activeTabId the host's
-      // list does not know yet (mid-switch) is not "another tab" — the panes
-      // fall back to their snapshot's active tab so the surface never blanks.
+      // The host knows the active tab: position every terminal by the host's
+      // layout (a browser page / file tab in front simply leaves the terminals
+      // hidden or in the other pane). An activeTabId the host's list does not
+      // know yet (mid-switch) is not "another tab" — the panes fall back to
+      // their snapshot's active tab, full size, so the surface never blanks.
       const activeHostTab = tabs.find((t) => t.id === activeTabId);
-      const otherTabActive = activeHostTab != null && activeHostTab.type !== 'terminal';
 
-      // Single pass over renderList: is a terminal the active visible surface,
-      // and what is its session id (null mid-load / browser-pane hiding). One
-      // source of truth, so the chrome's gate and its target can't diverge.
+      const styleInEntry = (entry: (typeof renderList)[number], tabId: string): CSSProperties | null => {
+        if (!entry.visible) return null;
+        const ownsActive = entry.data.tabs.some((t) => t.id === activeTabId);
+        const hostLayout = ownsActive || (activeHostTab != null && activeHostTab.type !== 'terminal');
+        if (hostLayout) return styleFor(tabId);
+        return tabId === entry.data.activeTabId ? FULL_PANE_STYLE : null;
+      };
+
+      // Is the FOCUSED tab a visible terminal, and which session (null mid-load)?
+      // One source of truth, so the mobile chrome's gate and its target can't
+      // diverge. Only the visible workspace that owns activeTabId counts.
       let activeTerminalVisible = false;
       let activeSessionId: string | null = null;
       for (const entry of renderList) {
-        if (!entry.visible || otherTabActive) continue;
-        // Only the visible workspace that actually owns the host's activeTabId is
-        // the active terminal. Guarding both on this (rather than the snapshot
-        // fallback) stops a second visible workspace's session from winning
-        // activeSessionId and routing the bar's input to the wrong shell.
+        if (!entry.visible) continue;
         if (!activeTabId || !entry.data.tabs.some((t) => t.id === activeTabId)) continue;
+        if (!styleFor(activeTabId)) continue;
         activeTerminalVisible = true;
         if (entry.data.sessions[activeTabId]) activeSessionId = activeTabId; // tab.id === sessionId
       }
@@ -684,82 +699,76 @@ export function useTerminalIntegration(
             // height + its measured height); unset → 0px on desktop / no bar. The
             // bar itself is position:fixed, so shrinking this layer never moves it.
             bottom: 'var(--omniterm-terminal-bottom-inset, 0px)',
-            pointerEvents: activeTerminalVisible ? 'auto' : 'none',
+            // Click-through everywhere except over a visible terminal pane (the
+            // other pane of a split may be a browser page or file underneath).
+            pointerEvents: 'none',
           }}
         >
-          {renderList.map((entry) => {
-            // Prefer the host's activeTabId for the visible workspace, else the
-            // snapshot's own active tab (the mid-switch frame where activePath
-            // flipped but activeTabId hasn't — keeps the surface from flashing blank).
-            const wsActiveTabId =
-              entry.visible && otherTabActive
-                ? null
-                : entry.visible && entry.data.tabs.some((t) => t.id === activeTabId)
-                  ? activeTabId
-                  : entry.data.activeTabId;
+          {renderList.map((entry) => (
+            <div
+              key={entry.path}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                display: entry.visible ? 'block' : 'none',
+              }}
+            >
+              {entry.data.tabs.map((tab) => {
+                const paneStyle = styleInEntry(entry, tab.id);
+                // A terminal tab is 1:1 with a session (tab.id === sessionId).
+                const session = entry.data.sessions[tab.id];
 
-            return (
-              <div
-                key={entry.path}
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  display: entry.visible ? 'block' : 'none',
-                }}
-              >
-                {entry.data.tabs.map((tab) => {
-                  const isActiveTab = tab.id === wsActiveTabId;
-                  // A terminal tab is 1:1 with a session (tab.id === sessionId).
-                  const session = entry.data.sessions[tab.id];
-
-                  return (
-                    <div
-                      key={tab.id}
-                      style={{
-                        position: 'absolute',
-                        inset: 0,
-                        display: isActiveTab ? 'flex' : 'none',
-                        flexDirection: 'column',
-                        minWidth: 0,
-                        minHeight: 0,
-                        background: 'var(--bg, #1e1e1e)',
-                      }}
-                    >
-                      {session ? (
-                        <TerminalView
-                          sessionId={session.id}
-                          port={session.port}
-                          ref={iframeRefFor(session.id)}
-                        />
-                      ) : (
-                        <div
-                          style={{
-                            flex: 1,
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            color: 'var(--text-muted)',
-                            fontSize: '14px',
-                          }}
-                        >
-                          Loading…
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
+                return (
+                  <div
+                    key={tab.id}
+                    data-terminal-tab={tab.id}
+                    style={{
+                      ...(paneStyle ?? FULL_PANE_STYLE),
+                      display: paneStyle ? 'flex' : 'none',
+                      flexDirection: 'column',
+                      minWidth: 0,
+                      minHeight: 0,
+                      background: 'var(--bg, #1e1e1e)',
+                      pointerEvents: 'auto',
+                    }}
+                  >
+                    {session ? (
+                      <TerminalView
+                        sessionId={session.id}
+                        port={session.port}
+                        ref={iframeRefFor(session.id)}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          flex: 1,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: 'var(--text-muted)',
+                          fontSize: '14px',
+                        }}
+                      >
+                        Loading…
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
           {isMobile && activeTerminalVisible && (
-            // Gated by the same `activeTerminalVisible` that drives pointerEvents
-            // (so it can't mount over an inert layer). Stays mounted across a
-            // transient session-load gap; `activeSessionId` (null mid-load) tells
-            // it which terminal to target and when to reset on a real switch.
-            <MobileInputChrome
-              activeSessionId={activeSessionId}
-              getWindow={() => resolveTerminalWindow(activeSessionId)}
-            />
+            // Gated by `activeTerminalVisible` (so it can't mount over a hidden
+            // terminal). Stays mounted across a transient session-load gap;
+            // `activeSessionId` (null mid-load) tells it which terminal to
+            // target and when to reset on a real switch. Its own wrapper
+            // re-enables pointer events (the layer root is click-through).
+            <div style={{ pointerEvents: 'auto' }}>
+              <MobileInputChrome
+                activeSessionId={activeSessionId}
+                getWindow={() => resolveTerminalWindow(activeSessionId)}
+              />
+            </div>
           )}
         </div>
       );
@@ -802,6 +811,7 @@ export function useTerminalIntegration(
       onCloseTab,
       tabIcon,
       iframeTabsLayer: renderTerminalLayer,
+      paneAware: true,
       alertedPaths,
       alertedTabIds,
       workspaceReady,

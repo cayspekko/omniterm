@@ -78,6 +78,26 @@ test('saveSettings deep-merges tabOrder per workspace and defaults the new keys'
   assert.deepStrictEqual(s.tabOrder, { '/a': ['browser:1', 't1'], '/b': ['t2'] });
 });
 
+test('saveSettings deep-merges splitView per workspace', async () => {
+  const { loadSettings, saveSettings } = await import('./settings.js');
+  try {
+    rmSync(SETTINGS_PATH);
+  } catch {
+    /* fresh */
+  }
+
+  assert.deepStrictEqual(loadSettings().splitView, {}, 'splitView defaults to an empty map');
+  const a = { secondaryTabId: 'browser:1', primaryTabId: 't1', ratio: 0.4, focused: 'primary' as const };
+  const b = { secondaryTabId: null, ratio: 0.5, focused: 'primary' as const };
+  saveSettings({ splitView: { '/a': a } });
+  saveSettings({ splitView: { '/b': b } });
+  assert.deepStrictEqual(loadSettings().splitView, { '/a': a, '/b': b });
+  // Re-saving one workspace replaces only that entry.
+  const a2 = { ...a, focused: 'secondary' as const, ratio: 0.6 };
+  saveSettings({ splitView: { '/a': a2 } });
+  assert.deepStrictEqual(loadSettings().splitView, { '/a': a2, '/b': b });
+});
+
 test('loadSettings still parses legacy files/browser panel settings', async () => {
   const { loadSettings } = await import('./settings.js');
 

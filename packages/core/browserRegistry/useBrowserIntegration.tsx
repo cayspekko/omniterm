@@ -6,8 +6,9 @@
  * a Chrome launched from it (xdg-open, $BROWSER, the [+] Browser action)
  * registers there. `BrowserPagesStore` watches each owner's registry and each
  * registered browser's CDP targets; `reconcileBrowserTabs` (pure) turns that
- * into host tab opens / updates / removes; the active browser tab renders one
- * `BrowserPageView` through `mainContent`.
+ * into host tab opens / updates / removes; each VISIBLE browser tab (one, or
+ * two in a split view) renders its own `BrowserPageView` through
+ * `mainContent`, which the host calls once per pane.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
@@ -296,6 +297,8 @@ export function useBrowserIntegration(args: UseBrowserIntegrationArgs): {
           error={status?.error ?? null}
           inspectorPosition={browserInspectorPosition}
           label={ctx.activeTab.name}
+          focused={ctx.focused !== false}
+          resizing={ctx.resizing === true}
           onActivate={() => {
             void store.send(ref.ownerTabId, ref.browserId, 'Target.activateTarget', {
               targetId: ref.targetId,
@@ -359,6 +362,7 @@ export function useBrowserIntegration(args: UseBrowserIntegrationArgs): {
       tabIcon,
       mainContent,
       iframeTabsLayer: layer,
+      paneAware: true,
       // Pages are process-bound; they come back from the live registry, never
       // from saved settings.
       ephemeralTabTypes: new Set([BROWSER_TAB_TYPE]),

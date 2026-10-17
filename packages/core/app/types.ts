@@ -9,7 +9,7 @@
  * their own `Map<tabId, ...>` if they need them.
  */
 
-import type { ReactNode } from 'react';
+import { createElement, Fragment, type CSSProperties, type ReactNode } from 'react';
 
 /** A tab in the host's tab list. Plugin-extension fields live elsewhere. */
 export interface Tab {
@@ -67,12 +67,58 @@ export interface HostApi {
   activateTab(id: string): void;
 }
 
-/** Render context passed to a plugin's `mainContent` slot. */
+/** Side of the content area a pane sits on (split view: primary = left). */
+export type PaneSide = 'primary' | 'secondary';
+
+/** Render context passed to a plugin's `mainContent` slot. The host calls the
+ *  slot once per VISIBLE pane (one, or two in a split), each inside its own
+ *  host-positioned box (`position: absolute`, `display: flex`). */
 export interface MainContentContext {
-  /** Currently active tab; never null when the slot is invoked. */
+  /** The tab this pane shows (the active tab in single-pane mode). Never null
+   *  when the slot is invoked. */
   activeTab: Tab;
   /** @deprecated Browser pages are tabs now; the host always passes `false`. */
   browserPanelOpen: boolean;
+  /** Which pane this call renders. Absent from older hosts: read as 'primary'. */
+  pane?: PaneSide;
+  /** This pane holds the strip's active tab. Absent from older hosts: true. */
+  focused?: boolean;
+  /** A pane/sidebar divider is being dragged: hold off expensive relayouts
+   *  (the browser view pauses screencast refits) until it flips back. */
+  resizing?: boolean;
+}
+
+/** Render state passed to a plugin's `iframeTabsLayer` slot. */
+export interface IframeTabsLayerState {
+  /** The strip's active tab (= the focused pane's tab). */
+  activeTabId: string | null;
+  /**
+   * Where a tab must render: an absolutely-positioned box within the content
+   * area (`position`, `top`, `right`, `bottom`, `left` — spread it onto the
+   * pane's root, and do not also set `inset`), or null when the tab is not
+   * visible (keep it mounted, `display: none`). Returned objects are stable
+   * while the layout is unchanged, so they are safe props for memo'd panes.
+   * Absent from older hosts: show only `activeTabId`, filling the area.
+   */
+  paneStyleFor?: (tabId: string) => CSSProperties | null;
+}
+
+/** The box that fills the whole content area (single pane). */
+export const FULL_PANE_STYLE: CSSProperties = Object.freeze({
+  position: 'absolute',
+  top: 0,
+  right: 0,
+  bottom: 0,
+  left: 0,
+}) as CSSProperties;
+
+/** `state.paneStyleFor`, falling back to the single-pane rule for older hosts. */
+export function paneStyleResolver(
+  state: IframeTabsLayerState,
+): (tabId: string) => CSSProperties | null {
+  return (
+    state.paneStyleFor ?? ((tabId: string) => (tabId === state.activeTabId ? FULL_PANE_STYLE : null))
+  );
 }
 
 /**
@@ -133,8 +179,18 @@ export interface PluginIntegration {
    *  `null` for tabs this integration doesn't own. */
   mainContent?: (ctx: MainContentContext) => ReactNode;
   /** Render slot for the host's iframe overlay. Each integration mounts
-   *  its own live tabs (all stay rendered; CSS toggles visibility). */
-  iframeTabsLayer?: (state: { activeTabId: string | null }) => ReactNode;
+   *  its own live tabs (all stay rendered; CSS toggles visibility). Position
+   *  each visible tab with `state.paneStyleFor(tabId)` and set `paneAware`.
+   *  Elements must manage their own `pointer-events` (a layer's root should be
+   *  `none` wherever it shows nothing, its visible panes `auto`). */
+  iframeTabsLayer?: (state: IframeTabsLayerState) => ReactNode;
+  /** This integration's `iframeTabsLayer` positions its panes with
+   *  `paneStyleFor`. Without it (a legacy layer that only reads
+   *  `activeTabId` and fills the area), `composeIntegrations` confines the
+   *  layer to the focused pane's box with `pointer-events: none`, so it can
+   *  only show the focused tab, and its interactive elements must set
+   *  `pointer-events: auto` themselves. */
+  paneAware?: boolean;
   /** Workspace paths with pending alerts (drives the workspace-icon
    *  badge). Driven by plugin SSE / polling. */
   alertedPaths?: ReadonlySet<string>;
@@ -225,10 +281,24 @@ export function composeIntegrations(...integrations: ReadonlyArray<PluginIntegra
       }
       return null;
     },
-    iframeTabsLayer: (state: { activeTabId: string | null }): ReactNode => {
-      const layers = integrations
-        .map((i) => i.iframeTabsLayer?.(state))
-        .filter((n): n is ReactNode => n != null && n !== false);
+    iframeTabsLayer: (state: IframeTabsLayerState): ReactNode => {
+      const layers: ReactNode[] = [];
+      integrations.forEach((i, index) => {
+        const node = i.iframeTabsLayer?.(state);
+        if (node == null || node === false) return;
+        if (i.paneAware) {
+          // Keyed by integration (not layer) index: a layer that renders
+          // nothing this time must not shift the others' identity.
+          layers.push(createElement(Fragment, { key: `layer-${index}` }, node));
+          return;
+        }
+        // Legacy layer: it fills its container with the active tab, so give it
+        // the focused pane's box as that container.
+        const box = (state.activeTabId && state.paneStyleFor?.(state.activeTabId)) || FULL_PANE_STYLE;
+        layers.push(
+          createElement('div', { key: `legacy-layer-${index}`, style: { ...box, pointerEvents: 'none' } }, node),
+        );
+      });
       return layers.length === 0 ? null : layers;
     },
   };

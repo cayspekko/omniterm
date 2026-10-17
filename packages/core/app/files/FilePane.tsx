@@ -1,6 +1,6 @@
 'use client';
 
-import { memo } from 'react';
+import { memo, type CSSProperties } from 'react';
 import FileViewer from '../components/FileViewer';
 import DiffViewer from '../components/DiffViewer';
 import PreviewPane from '../components/PreviewPane';
@@ -26,7 +26,8 @@ export interface OpenFile {
 interface Props {
   file: OpenFile;
   dirPath: string;
-  isActive: boolean;
+  /** The host's box for this tab (`paneStyleFor`), or null while hidden. */
+  paneStyle: CSSProperties | null;
   diff: boolean;
   reloadKey?: number;
   onDirty: (id: string, dirty: boolean) => void;
@@ -37,14 +38,14 @@ interface Props {
 }
 
 /**
- * One keep-alive viewer pane, filling the host's content area. Hidden panes
+ * One keep-alive viewer pane, in the host's pane box for its tab. Hidden panes
  * stay mounted (`display: none`) so CodeMirror state and undo history survive
  * tab switches.
  */
 function FilePane({
   file,
   dirPath,
-  isActive,
+  paneStyle,
   diff,
   reloadKey,
   onDirty,
@@ -54,12 +55,17 @@ function FilePane({
   onReloadPreview,
 }: Props) {
   const viewerKind = file.kind === 'source' ? detectViewerKind(file.path) : null;
+  const isActive = paneStyle !== null;
   return (
     <div
       data-file-tab={file.id}
       style={{
         position: 'absolute',
-        inset: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+        ...paneStyle,
         display: isActive ? 'flex' : 'none',
         flexDirection: 'column',
         background: 'var(--bg)',
