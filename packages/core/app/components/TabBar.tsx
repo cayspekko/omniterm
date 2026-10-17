@@ -12,9 +12,28 @@ export interface CreateMenuEntry {
   onSelect: () => void;
 }
 
+/** An entry of a tab's right-click menu. */
+export interface TabMenuItem {
+  label: string;
+  onSelect: () => void;
+  disabled?: boolean;
+  /** Draw a divider above this entry. */
+  separatorBefore?: boolean;
+}
+
+/** MIME type a dragged tab carries (its id), for drop targets outside the strip. */
+export const TAB_DRAG_MIME = 'application/x-omniterm-tab';
+
 interface Props {
   tabs: Tab[];
   activeTabId: string | null;
+  /** The tab visible in the unfocused pane of a split (secondary marker). */
+  secondaryTabId?: string | null;
+  /** Right-click menu entries for a tab; empty → the browser's own menu. */
+  tabMenu?: (tab: Tab) => TabMenuItem[];
+  /** A tab drag started / ended (drop targets outside the strip). */
+  onTabDragStart?: (tabId: string) => void;
+  onTabDragEnd?: () => void;
   alertedTabIds?: ReadonlySet<string>;
   /** Compact tabs (icon + short label) for narrow viewports. */
   compact?: boolean;
@@ -83,6 +102,10 @@ function TabImageIcon({ src, type, size }: { src: string; type: string; size: nu
 export default function TabBar({
   tabs,
   activeTabId,
+  secondaryTabId,
+  tabMenu,
+  onTabDragStart,
+  onTabDragEnd,
   alertedTabIds,
   compact,
   leftAction,
@@ -104,6 +127,35 @@ export default function TabBar({
   const stripRef = useRef<HTMLDivElement>(null);
   const addBtnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    items: TabMenuItem[];
+  } | null>(null);
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close the tab menu on outside click / Escape / resize / focus into an iframe.
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (ctxMenuRef.current?.contains(e.target as Node)) return;
+      setCtxMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCtxMenu(null);
+    };
+    const close = () => setCtxMenu(null);
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', close);
+    window.addEventListener('blur', close);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('blur', close);
+    };
+  }, [ctxMenu]);
 
   // Keep the active tab in view. Manual scrollLeft math rather than
   // scrollIntoView, which would also scroll the overflow:hidden ancestors.
@@ -213,6 +265,7 @@ export default function TabBar({
               data-tab-id={tab.id}
               role="tab"
               aria-selected={active}
+              data-split-visible={!active && tab.id === secondaryTabId ? 'true' : undefined}
               className={compact ? 'ot-tab ot-tab-compact' : 'ot-tab'}
               data-dragging={dragIndex === i ? 'true' : undefined}
               data-drop-target={
@@ -222,6 +275,12 @@ export default function TabBar({
               onDragStart={(e) => {
                 setDragIndex(i);
                 e.dataTransfer.effectAllowed = 'move';
+                try {
+                  e.dataTransfer.setData(TAB_DRAG_MIME, tab.id);
+                } catch {
+                  /* some browsers restrict custom types; the id is also in state */
+                }
+                onTabDragStart?.(tab.id);
               }}
               onDragOver={(e) => {
                 e.preventDefault();
@@ -238,6 +297,19 @@ export default function TabBar({
               onDragEnd={() => {
                 setDragIndex(null);
                 setDropIndex(null);
+                onTabDragEnd?.();
+              }}
+              onContextMenu={(e) => {
+                const items = tabMenu?.(tab) ?? [];
+                if (items.length === 0) return;
+                e.preventDefault();
+                const menuWidth = 180;
+                const menuHeight = items.length * 30 + 12;
+                setCtxMenu({
+                  x: Math.max(4, Math.min(e.clientX, window.innerWidth - menuWidth - 4)),
+                  y: Math.max(4, Math.min(e.clientY, window.innerHeight - menuHeight - 4)),
+                  items,
+                });
               }}
               onClick={() => onSelect(tab.id)}
               // Middle-click closes; preventDefault on mousedown stops autoscroll.
@@ -339,6 +411,34 @@ export default function TabBar({
           </div>,
           document.body,
         )}
+      {ctxMenu &&
+        createPortal(
+          <div
+            ref={ctxMenuRef}
+            role="menu"
+            style={{ ...S.addMenu, top: ctxMenu.y, left: ctxMenu.x }}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {ctxMenu.items.map((item) => (
+              <div key={item.label}>
+                {item.separatorBefore && <div style={S.menuSeparator} />}
+                <button
+                  role="menuitem"
+                  className="ot-menu-item"
+                  disabled={item.disabled}
+                  style={item.disabled ? S.disabled : undefined}
+                  onClick={() => {
+                    setCtxMenu(null);
+                    item.onSelect();
+                  }}
+                >
+                  {item.label}
+                </button>
+              </div>
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -371,6 +471,11 @@ const S: Record<string, React.CSSProperties> = {
     boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
     padding: '4px 0',
     zIndex: 1000,
+  },
+  menuSeparator: {
+    height: '1px',
+    margin: '4px 0',
+    background: 'var(--border)',
   },
   menuIcon: {
     display: 'flex',

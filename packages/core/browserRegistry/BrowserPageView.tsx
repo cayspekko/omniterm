@@ -81,15 +81,22 @@ interface Props {
    *  (and so only screencast) while they are the browser's active tab. */
   onActivate: () => void;
   label: string;
+  /** This page's pane holds the strip's active tab (always true unless split). */
+  focused?: boolean;
+  /** A divider is being dragged: the shim holds screencast refits until it
+   *  ends, then refits once to the final pane size. */
+  resizing?: boolean;
 }
 
 /**
- * One browser page, filling the content area: the embedded DevTools frontend
+ * One browser page, filling its pane: the embedded DevTools frontend
  * (screencast + optional inspector) for a single CDP target, connected through
  * the OmniTerm proxy (`/t/<owner>/b/<id>/page/<targetId>`).
  *
- * Only the active browser tab mounts one of these — each mounted frontend
- * runs its own screencast — so switching tabs reloads the frontend.
+ * Only VISIBLE browser tabs mount one of these (one per pane; at most two in a
+ * split, always different pages) — each mounted frontend runs its own
+ * screencast, refitted by the shim to its own iframe size — so switching tabs
+ * reloads the frontend.
  */
 export default function BrowserPageView({
   ownerTabId,
@@ -101,6 +108,8 @@ export default function BrowserPageView({
   inspectorPosition,
   onActivate,
   label,
+  focused = true,
+  resizing = false,
 }: Props) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const shimReadyRef = useRef(false);
@@ -119,6 +128,15 @@ export default function BrowserPageView({
     postToShim({ inspectorPosition });
   }, [inspectorPosition, postToShim]);
 
+  // Pause screencast refits during a divider drag (each refit is a
+  // stop/start round trip); the shim refits once to the final size on resume.
+  // Also re-sent once the shim reports ready, in case a drag started first.
+  const resizingRef = useRef(resizing);
+  resizingRef.current = resizing;
+  useEffect(() => {
+    postToShim({ resizing });
+  }, [resizing, postToShim]);
+
   // Depend on the ids + connection only: `onActivate` is a fresh closure each
   // render, and an activateTarget per render floods the proxied socket.
   const activateRef = useRef(onActivate);
@@ -126,6 +144,17 @@ export default function BrowserPageView({
   useEffect(() => {
     if (connected) activateRef.current();
   }, [connected, ownerTabId, browserId, targetId]);
+  // Again whenever this pane takes focus: in a split showing two pages of the
+  // same Chrome only its foreground tab keeps painting, so make that the page
+  // the user is working in.
+  const connectedRef = useRef(connected);
+  connectedRef.current = connected;
+  const wasFocusedRef = useRef(focused);
+  useEffect(() => {
+    const gained = focused && !wasFocusedRef.current;
+    wasFocusedRef.current = focused;
+    if (gained && connectedRef.current) activateRef.current();
+  }, [focused]);
 
   const baseUrl = `/t/${encodeURIComponent(ownerTabId)}`;
   const bid = encodeURIComponent(browserId);
@@ -152,6 +181,7 @@ export default function BrowserPageView({
               shimReadyRef.current = false;
               installDevToolsScreencastShim(event.currentTarget, inspectorPosition, () => {
                 shimReadyRef.current = true;
+                if (resizingRef.current) postToShim({ resizing: true });
               });
             }}
           />

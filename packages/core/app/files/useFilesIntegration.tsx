@@ -8,7 +8,8 @@
  * surfaces render from it:
  *   - `sidebarPanels[files]` — the tree, in the left sidebar;
  *   - `iframeTabsLayer`      — keep-alive viewer panes, one per open file,
- *                              shown only while that file's host tab is active.
+ *                              shown only while that file's host tab is visible
+ *                              (in the host's pane box: `paneStyleFor`).
  *
  * The store is the source of truth for which files are open; the host tab
  * strip is a mirror kept in step by one reconcile effect (see planReconcile).
@@ -19,7 +20,13 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { track } from '../telemetryClient';
-import type { HostApi, PluginIntegration, Tab } from '../types';
+import {
+  paneStyleResolver,
+  type HostApi,
+  type IframeTabsLayerState,
+  type PluginIntegration,
+  type Tab,
+} from '../types';
 import { FileIcon, FolderIcon, ImageIcon, PreviewIcon } from '../components/icons';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { detectViewerKind } from '../../lib/previewable';
@@ -648,8 +655,9 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
     </>
   );
 
-  const iframeTabsLayer = (state: { activeTabId: string | null }) => {
+  const iframeTabsLayer = (state: IframeTabsLayerState) => {
     if (!activePath && !closePrompt && !changesOnlyConfirm) return null;
+    const styleFor = paneStyleResolver(state);
     return (
       <Fragment key="files-layer">
         {activePath &&
@@ -659,7 +667,7 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
               key={f.id}
               file={f}
               dirPath={activePath}
-              isActive={state.activeTabId === f.id}
+              paneStyle={styleFor(f.id)}
               diff={changesOnly && f.originalContent !== null}
               reloadKey={previewReload[f.id]}
               onDirty={setDirty}
@@ -712,6 +720,7 @@ export function useFilesIntegration(args: UseFilesIntegrationArgs): { integratio
       onCloseTab,
       tabIcon,
       iframeTabsLayer,
+      paneAware: true,
       sidebarPanels,
       // Files restore themselves from `filePanelTabs`; the host must not.
       ephemeralTabTypes: FILE_EPHEMERAL,
