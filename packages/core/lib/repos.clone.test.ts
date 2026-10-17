@@ -27,7 +27,7 @@ test('cloning back to a tracked path whose checkout is gone tracks it once', asy
     writeFileSync(settingsFile, JSON.stringify({ trackedRepos: [clonePath], trackedDirs: [] }));
 
     const { cloneRepo, listRepos } = await import('./repos.js');
-    cloneRepo(source, clonePath);
+    await cloneRepo(source, clonePath);
 
     // Read the file directly: loadSettings would hide a duplicate by deduping.
     assert.deepEqual(JSON.parse(readFileSync(settingsFile, 'utf-8')).trackedRepos, [clonePath]);

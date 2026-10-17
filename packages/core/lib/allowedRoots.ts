@@ -34,9 +34,9 @@ export function setExtraAllowedRoots(roots: string[]): void {
 /**
  * Build the allowlist of roots that path-confined HTTP routes (`/api/fs`,
  * `/api/preview`, ...) may read from or write to. Home (shell state, app
- * settings, scratch files) plus every directory the user has explicitly
- * tracked plus every repo/worktree — in other words, every path the UI
- * would normally hand out, plus any operator-configured extra roots
+ * settings, scratch files) plus every tracked workspace plus every linked
+ * worktree of a tracked repo — in other words, every path the UI would
+ * normally hand out, plus any operator-configured extra roots
  * (`setExtraAllowedRoots`). Anything outside — /etc, the SSH key dir on a
  * different user, another bind mount — is rejected.
  *
@@ -47,7 +47,7 @@ export function setExtraAllowedRoots(roots: string[]): void {
 export function allowedRoots(): string[] {
   const settings = loadSettings();
   const roots = new Set<string>([homedir(), ...extraRoots]);
-  for (const d of settings.trackedDirs) roots.add(d);
+  for (const d of settings.workspaces) roots.add(d);
   for (const repo of listRepos()) {
     roots.add(repo.path);
     try {

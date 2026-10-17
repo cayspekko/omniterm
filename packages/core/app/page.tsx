@@ -58,6 +58,9 @@ import {
   type TabOrders,
 } from './workspacePanelState';
 import type { WorkspacesPanelMode, BrowserInspectorPosition } from '../lib/settings';
+import type { WorkspaceEntry } from '../lib/workspaces';
+import { on } from './events';
+import { hasAlertElsewhere } from './components/workspaceList';
 
 export type {
   HostApi,
@@ -82,22 +85,10 @@ export type {
 // see the same instance of the state.
 // =========================================================================
 
-interface WorktreeInfo {
-  id: string;
-  repoId: string;
-  branch: string;
-  path: string;
-  name: string;
-  sessionCount: number;
-  isMain?: boolean;
-}
-
-interface RepoInfo {
-  id: string;
-  name: string;
-  remoteUrl: string;
-  path: string;
-  addedAt: string;
+/** The `{ error }` a failed workspace route answers with, or a status fallback. */
+async function errorMessage(res: Response, fallback = 'Request failed'): Promise<string> {
+  const body = await res.json().catch(() => null);
+  return body && typeof body.error === 'string' ? body.error : `${fallback} (${res.status}).`;
 }
 
 /**
@@ -134,50 +125,49 @@ export interface HomeState {
   ) => void;
   /** Divider drag: set the ratio without other side effects. */
   setSplitRatio: (ratio: number) => void;
-  repos: RepoInfo[];
-  worktreesByRepo: Record<string, WorktreeInfo[]>;
-  activeWorktree: WorktreeInfo | null;
+  /** GET /api/workspaces: tracked folders, each followed by its linked worktrees. */
+  workspaces: WorkspaceEntry[];
   workspacesOpen: boolean;
   workspacesPanelMode: WorkspacesPanelMode;
   workspacesPanelDockedOpen: boolean;
   /** Selected left-sidebar section ("workspaces" or a plugin panel id). */
   sidebarSection: string;
-  workspaceFilterActiveOnly: boolean;
   workspacesWidth: number;
   settingsOpen: boolean;
   settingsPanelWidth: number;
   isResizing: boolean;
-  pendingDeleteRepo: { id: string; label: string } | null;
-  pendingDeleteWorktree: { wt: WorktreeInfo; dirty: boolean } | null;
+  pendingUntrack: { entry: WorkspaceEntry; label: string } | null;
+  pendingDeleteWorktree: { wt: WorkspaceEntry; dirty: boolean } | null;
   worktreeDeleteError: string | null;
   setWorkspacesOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setWorkspacesPanelMode: React.Dispatch<React.SetStateAction<WorkspacesPanelMode>>;
   setWorkspacesPanelDockedOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSidebarSection: React.Dispatch<React.SetStateAction<string>>;
   setBrowserInspectorPosition: React.Dispatch<React.SetStateAction<BrowserInspectorPosition>>;
-  setWorkspaceFilterActiveOnly: React.Dispatch<React.SetStateAction<boolean>>;
   setWorkspacesWidth: React.Dispatch<React.SetStateAction<number>>;
   setSettingsOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSettingsPanelWidth: React.Dispatch<React.SetStateAction<number>>;
   setIsResizing: React.Dispatch<React.SetStateAction<boolean>>;
-  setPendingDeleteRepo: React.Dispatch<
-    React.SetStateAction<{ id: string; label: string } | null>
+  setPendingUntrack: React.Dispatch<
+    React.SetStateAction<{ entry: WorkspaceEntry; label: string } | null>
   >;
   setPendingDeleteWorktree: React.Dispatch<
-    React.SetStateAction<{ wt: WorktreeInfo; dirty: boolean } | null>
+    React.SetStateAction<{ wt: WorkspaceEntry; dirty: boolean } | null>
   >;
   setWorktreeDeleteError: React.Dispatch<React.SetStateAction<string | null>>;
-  handleSelectWorktree: (wt: WorktreeInfo | null) => void;
-  handleSelectDirectory: (cwd: string) => void;
-  handleCreateWorktree: (repoId: string) => Promise<void>;
-  handleDeleteWorktree: (wt: WorktreeInfo) => Promise<void>;
-  handleRenameBranch: (wtId: string, newName: string) => Promise<void>;
-  handleCloneRepo: (url: string, destination: string) => Promise<Response>;
-  handleAddLocalRepo: (localPath: string) => Promise<void>;
-  handleDeleteRepo: (repoId: string, label: string) => void;
-  confirmDeleteRepo: () => Promise<void>;
+  /** Switch to a workspace folder (null deselects). */
+  handleSelectWorkspace: (path: string | null) => void;
+  /** Track a folder if needed, then switch to it. Resolves to an error message, or null. */
+  handleOpenWorkspace: (path: string) => Promise<string | null>;
+  /** Clone, track and switch to the clone. Resolves to an error message, or null. */
+  handleCloneWorkspace: (url: string, destination: string) => Promise<string | null>;
+  handleCreateWorktree: (repo: WorkspaceEntry) => Promise<void>;
+  handleDeleteWorktree: (wt: WorkspaceEntry) => Promise<void>;
+  handleRenameBranch: (wt: WorkspaceEntry, newName: string) => Promise<void>;
+  /** `label` is the row's rendered name, for the confirm prompt. */
+  handleUntrackWorkspace: (entry: WorkspaceEntry, label: string) => void;
+  confirmUntrackWorkspace: () => Promise<void>;
   confirmDeleteWorktree: () => Promise<void>;
-  handleRemoveDir: (dir: string) => Promise<void>;
 }
 
 /**
@@ -188,17 +178,15 @@ export interface HomeState {
  * like delete-repo) refreshes plugin-owned state too.
  */
 export interface UseHomeStateOptions {
-  /** Runs after repos+worktrees are fetched, on every `refreshWorkspaces()`.
+  /** Runs alongside the workspace list fetch, on every `refreshWorkspaces()`.
    *  Identity is snapshot via a ref each render, so callers don't need to
    *  ref-stabilize themselves; pass any inline closure. */
   onRefreshWorkspaces?: () => void | Promise<void>;
 }
 
 export function useHomeState(options?: UseHomeStateOptions): HomeState {
-  const [repos, setRepos] = useState<RepoInfo[]>([]);
-  const [worktreesByRepo, setWorktreesByRepo] = useState<Record<string, WorktreeInfo[]>>({});
+  const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
-  const [activeWorktree, setActiveWorktree] = useState<WorktreeInfo | null>(null);
   const [tabs, setTabsRaw] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
@@ -208,17 +196,16 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
   const [sidebarSection, setSidebarSection] = useState<string>(WORKSPACES_SECTION);
   const [browserInspectorPosition, setBrowserInspectorPosition] =
     useState<BrowserInspectorPosition>('hidden');
-  const [workspaceFilterActiveOnly, setWorkspaceFilterActiveOnly] = useState(false);
   const [workspacesWidth, setWorkspacesWidth] = useState(280);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPanelWidth, setSettingsPanelWidth] = useState(420);
   const [isResizing, setIsResizing] = useState(false);
-  const [pendingDeleteRepo, setPendingDeleteRepo] = useState<{
-    id: string;
+  const [pendingUntrack, setPendingUntrack] = useState<{
+    entry: WorkspaceEntry;
     label: string;
   } | null>(null);
   const [pendingDeleteWorktree, setPendingDeleteWorktree] = useState<{
-    wt: WorktreeInfo;
+    wt: WorkspaceEntry;
     dirty: boolean;
   } | null>(null);
   const [worktreeDeleteError, setWorktreeDeleteError] = useState<string | null>(null);
@@ -282,29 +269,18 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     },
     [forgetTabPosition],
   );
-  const fetchRepos = useCallback(async () => {
-    const res = await fetch('/api/repos');
-    if (res.ok) {
-      const data: RepoInfo[] = await res.json();
-      setRepos(data);
+  /** Fetch the workspace list; resolves to it (or null on failure) for callers
+   *  that need the fresh entries before state has re-rendered. */
+  const fetchWorkspaces = useCallback(async (): Promise<WorkspaceEntry[] | null> => {
+    try {
+      const res = await fetch('/api/workspaces');
+      if (!res.ok) return null;
+      const data = ((await res.json()) as { workspaces: WorkspaceEntry[] }).workspaces;
+      setWorkspaces(data);
       return data;
+    } catch {
+      return null;
     }
-    return [];
-  }, []);
-
-  const fetchAllWorktrees = useCallback(async (repoList: RepoInfo[]) => {
-    // Fetch concurrently — serial awaits made refresh latency scale with repo count.
-    const entries = await Promise.all(
-      repoList.map(async (repo) => {
-        const res = await fetch(`/api/repos/${repo.id}/worktrees`);
-        return res.ok ? ([repo.id, await res.json()] as const) : null;
-      }),
-    );
-    const byRepo: Record<string, WorktreeInfo[]> = {};
-    for (const entry of entries) {
-      if (entry) byRepo[entry[0]] = entry[1];
-    }
-    setWorktreesByRepo(byRepo);
   }, []);
 
   // Snapshot via ref so refreshWorkspaces' identity stays stable even if
@@ -314,11 +290,10 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
   onRefreshWorkspacesRef.current = options?.onRefreshWorkspaces;
 
   const refreshWorkspaces = useCallback(async () => {
-    const repoList = await fetchRepos();
-    await Promise.all([fetchAllWorktrees(repoList), onRefreshWorkspacesRef.current?.()]);
-  }, [fetchRepos, fetchAllWorktrees]);
+    await Promise.all([fetchWorkspaces(), onRefreshWorkspacesRef.current?.()]);
+  }, [fetchWorkspaces]);
 
-  // Initial hydration from /api/settings + repos/worktrees.
+  // Initial hydration from /api/settings + the workspace list.
   useEffect(() => {
     refreshWorkspaces();
     fetch('/api/settings')
@@ -340,9 +315,6 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
         }
         if (typeof data.workspacesPanelDockedOpen === 'boolean') {
           setWorkspacesPanelDockedOpen(data.workspacesPanelDockedOpen);
-        }
-        if (typeof data.workspaceFilterActiveOnly === 'boolean') {
-          setWorkspaceFilterActiveOnly(data.workspaceFilterActiveOnly);
         }
         if (
           data.browserInspectorPosition === 'hidden' ||
@@ -373,7 +345,6 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
         activeTabId,
         workspacesPanelMode,
         workspacesPanelDockedOpen,
-        workspaceFilterActiveOnly,
         sidebarSection,
         browserInspectorPosition,
       }),
@@ -384,7 +355,6 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     activeTabId,
     workspacesPanelMode,
     workspacesPanelDockedOpen,
-    workspaceFilterActiveOnly,
     sidebarSection,
     browserInspectorPosition,
   ]);
@@ -591,56 +561,64 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     [removeTabInternal],
   );
 
-  const handleSelectWorktree = useCallback(
-    (wt: WorktreeInfo | null) => {
-      const nextPath = wt?.path ?? null;
-      if (!shouldResetWorkspaceTabs(activePath, nextPath)) {
-        setActiveWorktree((prev) => (prev?.id === wt?.id ? prev : wt));
-        return;
-      }
+  const handleSelectWorkspace = useCallback(
+    (nextPath: string | null) => {
+      if (!shouldResetWorkspaceTabs(activePath, nextPath)) return;
       setActivePath(nextPath);
-      setActiveWorktree(wt);
       setTabs([]);
       setActiveTabId(null);
-      track('workspace_switched', { kind: 'worktree' });
+      if (nextPath) track('workspace_switched', { kind: 'workspace' });
     },
-    [activePath],
+    [activePath, setTabs],
   );
 
-  const handleSelectDirectory = useCallback(
-    (cwd: string) => {
-      if (!shouldResetWorkspaceTabs(activePath, cwd)) {
-        setActiveWorktree((prev) => (prev === null ? prev : null));
-        setWorkspacesOpen(false);
-        return;
+  /** POST a workspace route and switch to the entry it answers with. */
+  const trackAndSelect = useCallback(
+    async (url: string, body: unknown): Promise<string | null> => {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) return await errorMessage(res);
+        const entry: WorkspaceEntry = await res.json();
+        await refreshWorkspaces();
+        handleSelectWorkspace(entry.path);
+        return null;
+      } catch {
+        return 'Could not reach the server.';
       }
-      setActiveWorktree(null);
-      setActivePath(cwd);
-      setTabs([]);
-      setActiveTabId(null);
-      setWorkspacesOpen(false);
-      track('workspace_switched', { kind: 'directory' });
     },
-    [activePath],
+    [refreshWorkspaces, handleSelectWorkspace],
+  );
+
+  const handleOpenWorkspace = useCallback(
+    (path: string) => {
+      // Already listed under this spelling: switch without a round-trip.
+      if (workspaces.some((w) => w.path === path)) {
+        handleSelectWorkspace(path);
+        return Promise.resolve(null);
+      }
+      return trackAndSelect('/api/workspaces', { path });
+    },
+    [workspaces, handleSelectWorkspace, trackAndSelect],
+  );
+
+  const handleCloneWorkspace = useCallback(
+    (url: string, destination: string) =>
+      trackAndSelect('/api/workspaces/clone', { url, destination: destination || undefined }),
+    [trackAndSelect],
   );
 
   const handleCreateWorktree = useCallback(
-    async (repoId: string) => {
-      const res = await fetch(`/api/repos/${repoId}/worktrees`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ newBranch: true }),
-      });
-      if (res.ok) {
-        const wt: WorktreeInfo = await res.json();
-        await refreshWorkspaces();
-        handleSelectWorktree({ ...wt, sessionCount: 0 });
-      }
+    async (repo: WorkspaceEntry) => {
+      await trackAndSelect('/api/workspaces/worktrees', { path: repo.path, newBranch: true });
     },
-    [refreshWorkspaces, handleSelectWorktree],
+    [trackAndSelect],
   );
 
-  const handleDeleteWorktree = useCallback(async (wt: WorktreeInfo) => {
+  const handleDeleteWorktree = useCallback(async (wt: WorkspaceEntry) => {
     // Probe uncommitted-changes state so the confirm dialog can warn before we
     // discard work. probeIsDirty fails safe to dirty (see its doc) so a failed
     // or garbled probe still warns and forces rather than silently omitting.
@@ -654,33 +632,35 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     setPendingDeleteWorktree({ wt, dirty });
   }, []);
 
+  const clearActiveIf = useCallback(
+    (gone: (path: string) => boolean) => {
+      if (activePath && gone(activePath)) {
+        setActivePath(null);
+        setTabs([]);
+        setActiveTabId(null);
+      }
+    },
+    [activePath, setTabs],
+  );
+
   const confirmDeleteWorktree = useCallback(async () => {
     const pending = pendingDeleteWorktree;
     setPendingDeleteWorktree(null);
     if (!pending) return;
     const { wt, dirty } = pending;
     try {
-      const res = await fetch(worktreeDeleteUrl(wt.id, dirty), { method: 'DELETE' });
+      const res = await fetch(worktreeDeleteUrl(wt.path, dirty), { method: 'DELETE' });
       if (!res.ok) {
         // The user confirmed a destructive action and it didn't happen (the
         // worktree went dirty between probe and confirm → 409, a locked worktree,
         // or a 5xx). Surface the server's reason instead of silently leaving a
         // blank panel, and don't clobber the still-live active session for a
         // worktree that wasn't actually removed.
-        const reason = await res
-          .json()
-          .then((b) => (b && typeof b.error === 'string' ? (b.error as string) : null))
-          .catch(() => null);
-        setWorktreeDeleteError(reason ?? `Delete failed (${res.status}).`);
+        setWorktreeDeleteError(await errorMessage(res, 'Delete failed'));
         await refreshWorkspaces();
         return;
       }
-      if (activeWorktree?.id === wt.id) {
-        setActiveWorktree(null);
-        setActivePath(null);
-        setTabs([]);
-        setActiveTabId(null);
-      }
+      clearActiveIf((p) => p === wt.path);
       await refreshWorkspaces();
     } catch {
       // Network error reaching the server — the user confirmed but nothing
@@ -689,11 +669,11 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
       setWorktreeDeleteError('Delete failed — could not reach the server.');
       await refreshWorkspaces();
     }
-  }, [pendingDeleteWorktree, activeWorktree, refreshWorkspaces]);
+  }, [pendingDeleteWorktree, clearActiveIf, refreshWorkspaces]);
 
   const handleRenameBranch = useCallback(
-    async (wtId: string, newName: string) => {
-      await fetch(`/api/worktrees/${wtId}/rename`, {
+    async (wt: WorkspaceEntry, newName: string) => {
+      await fetch(`/api/worktrees/${encodeURIComponent(wt.id)}/rename`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ newName }),
@@ -703,70 +683,20 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     [refreshWorkspaces],
   );
 
-  const handleCloneRepo = useCallback(
-    async (url: string, destination: string) => {
-      const res = await fetch('/api/repos', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, destination }),
-      });
-      await refreshWorkspaces();
-      return res;
-    },
-    [refreshWorkspaces],
-  );
-
-  const handleAddLocalRepo = useCallback(
-    async (localPath: string) => {
-      await fetch('/api/repos', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ localPath }),
-      });
-      await refreshWorkspaces();
-    },
-    [refreshWorkspaces],
-  );
-
-  // `label` is the row's rendered name (see buildRepoLabels) — the repo id is a
-  // path digest and would name nothing the user can see in a destructive prompt.
-  const handleDeleteRepo = useCallback((repoId: string, label: string) => {
-    setPendingDeleteRepo({ id: repoId, label });
+  const handleUntrackWorkspace = useCallback((entry: WorkspaceEntry, label: string) => {
+    setPendingUntrack({ entry, label });
   }, []);
 
-  const confirmDeleteRepo = useCallback(async () => {
-    const repoId = pendingDeleteRepo?.id;
-    setPendingDeleteRepo(null);
-    if (!repoId) return;
-    await fetch(`/api/repos/${repoId}`, { method: 'DELETE' });
-    if (activeWorktree?.repoId === repoId) {
-      setActiveWorktree(null);
-      setActivePath(null);
-      setTabs([]);
-      setActiveTabId(null);
-    }
+  const confirmUntrackWorkspace = useCallback(async () => {
+    const entry = pendingUntrack?.entry;
+    setPendingUntrack(null);
+    if (!entry) return;
+    await fetch(`/api/workspaces?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' });
+    // Its auto-listed worktrees leave the list with it.
+    const nested = new Set(workspaces.filter((w) => w.parent === entry.path).map((w) => w.path));
+    clearActiveIf((p) => p === entry.path || nested.has(p));
     await refreshWorkspaces();
-  }, [pendingDeleteRepo, activeWorktree, refreshWorkspaces]);
-
-  const handleRemoveDir = useCallback(
-    async (dir: string) => {
-      const settings = await fetch('/api/settings').then((r) => r.json());
-      await fetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          trackedDirs: (settings.trackedDirs || []).filter((d: string) => d !== dir),
-        }),
-      });
-      if (activePath === dir) {
-        setActivePath(null);
-        setTabs([]);
-        setActiveTabId(null);
-      }
-      await refreshWorkspaces();
-    },
-    [activePath, refreshWorkspaces],
-  );
+  }, [pendingUntrack, workspaces, clearActiveIf, refreshWorkspaces]);
 
   return {
     activePath,
@@ -781,20 +711,17 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     split,
     applySplit,
     setSplitRatio,
-    repos,
-    worktreesByRepo,
-    activeWorktree,
+    workspaces,
     workspacesOpen,
     workspacesPanelMode,
     workspacesPanelDockedOpen,
     sidebarSection,
     browserInspectorPosition,
-    workspaceFilterActiveOnly,
     workspacesWidth,
     settingsOpen,
     settingsPanelWidth,
     isResizing,
-    pendingDeleteRepo,
+    pendingUntrack,
     pendingDeleteWorktree,
     worktreeDeleteError,
     setWorkspacesOpen,
@@ -802,25 +729,22 @@ export function useHomeState(options?: UseHomeStateOptions): HomeState {
     setWorkspacesPanelDockedOpen,
     setSidebarSection,
     setBrowserInspectorPosition,
-    setWorkspaceFilterActiveOnly,
     setWorkspacesWidth,
     setSettingsOpen,
     setSettingsPanelWidth,
     setIsResizing,
-    setPendingDeleteRepo,
+    setPendingUntrack,
     setPendingDeleteWorktree,
     setWorktreeDeleteError,
-    handleSelectWorktree,
-    handleSelectDirectory,
+    handleSelectWorkspace,
+    handleOpenWorkspace,
+    handleCloneWorkspace,
     handleCreateWorktree,
     handleDeleteWorktree,
     handleRenameBranch,
-    handleCloneRepo,
-    handleAddLocalRepo,
-    handleDeleteRepo,
-    confirmDeleteRepo,
+    handleUntrackWorkspace,
+    confirmUntrackWorkspace,
     confirmDeleteWorktree,
-    handleRemoveDir,
   };
 }
 
@@ -1043,14 +967,48 @@ export default function Home(props: HomeProps) {
     [host, isDocked],
   );
 
-  const handleSelectWorktreeAndClose = useCallback(
-    (wt: WorktreeInfo) => {
-      host.handleSelectWorktree(wt);
+  const handleSelectWorkspaceAndClose = useCallback(
+    (path: string) => {
+      host.handleSelectWorkspace(path);
       // Docked mode keeps the sidebar pinned — selecting a worktree shouldn't hide it.
       if (!isDocked) host.setWorkspacesOpen(false);
     },
     [host, isDocked],
   );
+
+  /** Wrap a track-and-switch action so a success dismisses the overlay sidebar. */
+  const closingOnSuccess = useCallback(
+    <A extends unknown[]>(action: (...args: A) => Promise<string | null>) =>
+      async (...args: A) => {
+        const err = await action(...args);
+        if (!err && !isDocked) host.setWorkspacesOpen(false);
+        return err;
+      },
+    [host, isDocked],
+  );
+  const handleOpenWorkspaceAndClose = useMemo(
+    () => closingOnSuccess(host.handleOpenWorkspace),
+    [closingOnSuccess, host.handleOpenWorkspace],
+  );
+  const handleCloneWorkspaceAndClose = useMemo(
+    () => closingOnSuccess(host.handleCloneWorkspace),
+    [closingOnSuccess, host.handleCloneWorkspace],
+  );
+
+  // Cross-area requests (see app/events.ts): other sections ask to switch
+  // workspace or to reveal a sidebar section.
+  useEffect(
+    () =>
+      on('omniterm:open-workspace', ({ path }) => {
+        void handleOpenWorkspaceAndClose(path).then((err) => {
+          if (err) console.warn(`[home] could not open workspace ${path}: ${err}`);
+        });
+      }),
+    [handleOpenWorkspaceAndClose],
+  );
+  useEffect(() => on('omniterm:show-sidebar', ({ section }) => openSidebarOn(section)), [
+    openSidebarOn,
+  ]);
 
   // When the user switches display mode while the sidebar is visible, carry
   // the visibility across: the two modes use independent flags
@@ -1077,47 +1035,35 @@ export default function Home(props: HomeProps) {
 
   const workspacePanelElement = (
     <WorkspacePanel
-      repos={host.repos}
-      worktreesByRepo={host.worktreesByRepo}
+      workspaces={host.workspaces}
       orphanSessions={effectiveOrphans}
-      activeWorktreeId={host.activeWorktree?.id || null}
       activePath={host.activePath}
       alertedPaths={alertedPathSet}
-      activeOnly={host.workspaceFilterActiveOnly}
-      onSelectWorktree={handleSelectWorktreeAndClose}
+      onSelect={handleSelectWorkspaceAndClose}
+      onOpenPath={handleOpenWorkspaceAndClose}
+      onClone={handleCloneWorkspaceAndClose}
       onCreateWorktree={host.handleCreateWorktree}
       onDeleteWorktree={host.handleDeleteWorktree}
       onRenameBranch={host.handleRenameBranch}
-      onCloneRepo={host.handleCloneRepo}
-      onAddLocalRepo={host.handleAddLocalRepo}
-      onDeleteRepo={host.handleDeleteRepo}
-      onRemoveDir={host.handleRemoveDir}
-      onSelectDirectory={host.handleSelectDirectory}
-      onToggleActiveOnly={() => host.setWorkspaceFilterActiveOnly((prev) => !prev)}
+      onUntrack={host.handleUntrackWorkspace}
     />
   );
 
   const workspacesActions = (
     <WorkspaceHeaderActions
-      activeOnly={host.workspaceFilterActiveOnly}
-      onToggleActiveOnly={() => host.setWorkspaceFilterActiveOnly((prev) => !prev)}
       onRefresh={() => void host.refreshWorkspaces()}
       onGoHome={() => {
-        host.handleSelectWorktree(null);
+        host.handleSelectWorkspace(null);
         if (!isDocked) host.setWorkspacesOpen(false);
       }}
     />
   );
 
-  const hasAlerts = useMemo(() => {
-    if (effectiveAlertedPaths.size === 0) return false;
-    const workspacePaths: string[] = [];
-    for (const wts of Object.values(host.worktreesByRepo)) {
-      for (const wt of wts) workspacePaths.push(wt.path);
-    }
-    for (const dir of Object.keys(effectiveOrphans)) workspacePaths.push(dir);
-    return workspacePaths.some((wp) => wp !== host.activePath && effectiveAlertedPaths.has(wp));
-  }, [effectiveAlertedPaths, host.worktreesByRepo, effectiveOrphans, host.activePath]);
+  const hasAlerts = useMemo(
+    () =>
+      hasAlertElsewhere(host.workspaces, effectiveOrphans, effectiveAlertedPaths, host.activePath),
+    [host.workspaces, effectiveOrphans, effectiveAlertedPaths, host.activePath],
+  );
 
   // The badge surfaces alerts in other workspaces, but only while the sidebar
   // is hidden — once visible, the in-list highlight already shows where.
@@ -1343,7 +1289,7 @@ export default function Home(props: HomeProps) {
       return (
         <div style={S.empty}>
           <div style={S.emptyTitle}>No workspace selected</div>
-          <div style={S.emptyHint}>Pick a repository, worktree or directory to work in.</div>
+          <div style={S.emptyHint}>Pick a folder to work in.</div>
           <div style={S.emptyActions}>
             <button className="ot-empty-btn" onClick={() => openSidebarOn(WORKSPACES_SECTION)}>
               <SidebarIcon size={14} />
@@ -1495,23 +1441,27 @@ export default function Home(props: HomeProps) {
         <StatusBar cwd={host.activePath} isMobile={host.isMobile} />
       </main>
 
-      {host.pendingDeleteRepo && (
+      {host.pendingUntrack && (
         <ConfirmDialog
-          title="Remove Repository"
-          message={`Remove "${host.pendingDeleteRepo.label}" and all its worktrees and sessions?`}
+          title="Remove Workspace"
+          message={
+            host.pendingUntrack.entry.git?.isMainWorktree
+              ? `Remove "${host.pendingUntrack.label}" from workspaces? Its terminal sessions are closed and clean worktrees removed; the folder stays on disk.`
+              : `Remove "${host.pendingUntrack.label}" from workspaces? The folder stays on disk.`
+          }
           buttons={[
-            { label: 'Remove', danger: true, action: host.confirmDeleteRepo },
-            { label: 'Cancel', action: () => host.setPendingDeleteRepo(null) },
+            { label: 'Remove', danger: true, action: host.confirmUntrackWorkspace },
+            { label: 'Cancel', action: () => host.setPendingUntrack(null) },
           ]}
-          onClose={() => host.setPendingDeleteRepo(null)}
+          onClose={() => host.setPendingUntrack(null)}
         />
       )}
       {host.pendingDeleteWorktree && (
         <ConfirmDialog
-          title="Remove Workspace"
+          title="Delete Worktree"
           message={
             <>
-              Remove workspace &quot;{host.pendingDeleteWorktree.wt.branch}&quot;?
+              Delete worktree &quot;{host.pendingDeleteWorktree.wt.git?.branch ?? host.pendingDeleteWorktree.wt.name}&quot; and its folder?
               {host.pendingDeleteWorktree.dirty && (
                 <div style={{ color: 'var(--danger)', marginTop: '8px' }}>
                   This workspace has uncommitted changes that will be permanently lost.
