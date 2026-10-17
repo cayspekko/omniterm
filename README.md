@@ -60,6 +60,27 @@ the command after it, since the package ships more than one binary:
 npx -p @omniterm/host omniterm
 ```
 
+### Run with Docker
+
+The repository includes a Docker Compose setup with `tmux`, `ttyd`, and Chrome
+on a virtual display, so the remote browser works without a desktop:
+
+```bash
+docker compose up -d
+```
+
+Then open <http://localhost:17717>. The port is bound to `127.0.0.1` only.
+
+- The default `workstation` image adds zsh with Oh My Zsh, an SSH client, vim,
+  and curl. Build `--target base` for only what omniterm needs.
+- The container's home directory is kept in a volume, so dotfiles and shell
+  history survive a rebuild. This repository is mounted at `~/work/omniterm`.
+- To work on folders from the host, add bind mounts in a
+  `docker-compose.override.yml` file. The example at the top of
+  `docker-compose.yml` shows how.
+- `docker compose --profile dev up omniterm-dev` runs omniterm from this
+  checkout with hot reload at <http://localhost:5173>.
+
 ### Change the ports
 
 Use a different web server port:
@@ -82,6 +103,10 @@ Run `omniterm --help` to see every command-line option.
 ### Terminals
 
 - Open several terminal tabs and split each tab into multiple panes.
+- Put any two tabs side by side: a terminal and a file, or a terminal and a
+  browser page.
+- Open a terminal in any folder from the file tree, or drop a file on a
+  terminal to type its path.
 - Arrange panes side by side or top to bottom.
 - Reorder and rename tabs.
 - Scroll through terminal output and select text normally.
@@ -89,9 +114,11 @@ Run `omniterm --help` to see every command-line option.
 
 ### Workspaces
 
-- Switch between Git repositories, worktrees, and regular directories.
-- Clone a repository or browse the server's files to add a workspace.
-- Create and manage Git worktrees from the browser.
+- Open any folder as a workspace. omniterm detects Git on its own, so a
+  repository and a plain directory work the same way.
+- Type a path with completion, or clone a repository, from one Open box.
+- See each repository's worktrees beneath it, and create or remove worktrees
+  from the browser.
 - Run multiple coding agents in separate workspaces and watch them side by side.
 
 ### Files
@@ -100,6 +127,16 @@ Run `omniterm --help` to see every command-line option.
 - View images, PDFs, and CSV or TSV files without leaving omniterm.
 - See file changes when another program or coding agent edits a file.
 - Load editor support only when you open a file that needs it.
+- Create, rename, move, and delete files and folders from the file tree.
+
+### Git
+
+- See changed files in the Changes view, then stage, unstage, discard, and
+  commit them.
+- Open a change as a diff, open the file itself, or find it in the file tree.
+- See the branch, commits ahead and behind, and the number of changes in the
+  status bar.
+- Switch or create branches, or open a branch in a new worktree.
 
 ### Interactive remote browser
 
@@ -111,7 +148,7 @@ Chrome starts on the server and appears in omniterm as a live view.
 - Click, type, and scroll the remote page from any device.
 - Finish sign-in flows on a server without a desktop.
 - Switch between running browsers and their open pages from the tab strip.
-- Dock the panel beside your terminal or float it on top.
+- Open pages as tabs next to your terminals and files.
 - Put Chrome DevTools beside the page, below it, or hide it.
 - Chrome uses its own profile, so your personal cookies and passwords stay out
   of it.
