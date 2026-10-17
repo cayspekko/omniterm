@@ -58,7 +58,10 @@ export function buildTtydArgs(
     '--',
     'bash',
     '-c',
-    `exec tmux attach-session -t ${sessionName}`,
+    // -u: the browser terminal is always UTF-8, but tmux decides from the
+    // locale, and without a UTF-8 one (e.g. a container with LANG unset) it
+    // draws every non-ASCII character, prompt glyphs included, as `_`.
+    `exec tmux -u attach-session -t ${sessionName}`,
   ];
 }
 

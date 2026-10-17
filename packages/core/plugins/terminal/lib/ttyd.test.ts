@@ -51,3 +51,8 @@ test('getTtydPidsToKill removes all ttyd listeners whose tmux session is gone', 
   assert.equal(pids.includes(700), false);
   assert.equal(pids.includes(800), false);
 });
+
+test('buildTtydArgs: attaches tmux in forced UTF-8 mode so non-ASCII survives a C locale', () => {
+  const args = buildTtydArgs('sess', 7700, {});
+  assert.equal(args.at(-1), 'exec tmux -u attach-session -t sess');
+});
