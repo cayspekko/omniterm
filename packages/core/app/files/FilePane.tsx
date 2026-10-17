@@ -8,19 +8,27 @@ import DedicatedViewer from '../components/DedicatedViewer';
 import { detectViewerKind, isPreviewable } from '../../lib/previewable';
 import type { FileTabKind } from './fileTabs';
 
+/** Which change a diff tab shows: unstaged (index -> working tree) or staged (HEAD -> index). */
+export type DiffMode = 'worktree' | 'staged';
+
 export interface OpenFile {
   /** Host tab id (`fileTabId`). */
   id: string;
   /** Workspace-relative path; shared by a source/preview pair. */
   path: string;
-  /** "source" = editor/diff/dedicated viewer, "preview" = rendered iframe. */
+  /** "source" = editor/diff/dedicated viewer, "preview" = rendered iframe,
+   *  "diff" = read-only view of the file's git changes. */
   kind: FileTabKind;
+  /** File text (for a diff tab: the changed side). */
   content: string;
   language: string;
   size: number;
-  /** HEAD content for the diff view (changes-only mode); null otherwise. */
+  /** The unchanged side for the diff view (a diff tab; or a source tab in
+   *  changes-only mode, where it is HEAD); null otherwise. */
   originalContent: string | null;
   isDirty: boolean;
+  /** Diff tabs only. */
+  diffMode?: DiffMode;
 }
 
 interface Props {

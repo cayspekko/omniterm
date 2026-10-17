@@ -8,7 +8,8 @@
 
 import type { Tab } from '../types';
 
-export type FileTabKind = 'source' | 'preview';
+/** `diff` tabs are read-only views of a file's git changes (never persisted). */
+export type FileTabKind = 'source' | 'preview' | 'diff';
 
 /** The host tab `type` every file tab carries. */
 export const FILE_TAB_TYPE = 'file';
@@ -38,7 +39,7 @@ export function isFileTabId(id: string): boolean {
 export function parseFileTabId(id: string): { kind: FileTabKind; absPath: string } | null {
   if (!isFileTabId(id)) return null;
   const rest = id.slice(ID_PREFIX.length);
-  for (const kind of ['source', 'preview'] as const) {
+  for (const kind of ['source', 'preview', 'diff'] as const) {
     if (rest.startsWith(`${kind}:`)) return { kind, absPath: rest.slice(kind.length + 1) };
   }
   return null;
@@ -52,8 +53,8 @@ export function parseFileTabId(id: string): { kind: FileTabKind; absPath: string
  * trailing-ancestor suffix that disambiguates within that group:
  *   - `a/lib/x.ts` vs `b/lib/x.ts`     → `x.ts — a/lib`, `x.ts — b/lib`
  *   - `src/foo/y.ts` vs `src/bar/y.ts` → `y.ts — foo`,   `y.ts — bar`
- * Source/preview pairs of the SAME path are told apart by their tab icon, so
- * a group whose paths are all identical never grows a noisy suffix.
+ * Tabs of the SAME path (source / preview / diff) are told apart by their tab
+ * icon, so a group whose paths are all identical never grows a noisy suffix.
  */
 export function computeLabels(tabs: ReadonlyArray<{ path: string }>): string[] {
   const result: string[] = tabs.map((t) => t.path.split('/').pop() ?? t.path);
@@ -98,8 +99,8 @@ export function desiredHostTabs(
   return files.map((f, i) => ({
     type: FILE_TAB_TYPE,
     id: fileTabId(root, f.kind, f.path),
-    name: labels[i],
-    title: f.kind === 'preview' ? `Preview: ${f.path}` : f.path,
+    name: f.kind === 'diff' ? `${labels[i]} (diff)` : labels[i],
+    title: f.kind === 'preview' ? `Preview: ${f.path}` : f.kind === 'diff' ? `Changes: ${f.path}` : f.path,
     dirty: f.isDirty,
     renamable: false,
   }));
@@ -148,10 +149,12 @@ export function parsePersisted(raw: unknown): PersistedFileTabs {
   return { open, active };
 }
 
+/** Diff tabs are dropped: they show git state at one moment, not a file to restore. */
 export function serializePersisted(
-  open: ReadonlyArray<FileRef>,
+  allOpen: ReadonlyArray<FileRef>,
   active: FileRef | null,
 ): PersistedFileTabs {
+  const open = allOpen.filter((o) => o.kind !== 'diff');
   const stillOpen =
     active && open.some((o) => o.kind === active.kind && o.path === active.path) ? active : null;
   return {
@@ -193,8 +196,8 @@ export interface ReconcilePlan {
 /**
  * Diff the store's desired tabs against the host's list.
  *
- * - desired + missing from host + not suppressed → open (a preview goes after
- *   its source tab when that is shown or opened earlier in the same plan).
+ * - desired + missing from host + not suppressed → open (a preview or diff goes
+ *   after its source tab when that is shown or opened earlier in the same plan).
  * - desired + present with stale name/title/dirty → update.
  * - a file-id tab in the host that the store doesn't hold → remove, but only
  *   when `pruneStale` (the store is hydrated for the current workspace).
@@ -220,7 +223,7 @@ export function planReconcile(args: {
       if (suppressed?.has(d.id)) continue;
       let after: string | undefined;
       const parsed = parseFileTabId(d.id);
-      if (parsed?.kind === 'preview') {
+      if (parsed && parsed.kind !== 'source') {
         const sourceId = `${ID_PREFIX}source:${parsed.absPath}`;
         if (shown.has(sourceId)) after = sourceId;
       }
