@@ -26,6 +26,7 @@ import { existsSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 
 import { reposRouter } from './routes/repos.js';
+import { workspacesRouter } from './routes/workspaces.js';
 import { worktreesRouter } from './routes/worktrees.js';
 import { settingsRouter } from './routes/settings.js';
 import { fsRouter } from './routes/fs.js';
@@ -289,6 +290,7 @@ export function startServer(opts: StartServerOptions = {}): Promise<StartServerH
   // Host API routes (workspace/repo/worktree mgmt, settings, files,
   // legacy create-session). Plugin-owned routes are mounted further down.
   app.use('/api', reposRouter);
+  app.use('/api', workspacesRouter);
   app.use('/api', sessionsRouter);
   app.use('/api', worktreesRouter);
   app.use('/api', settingsRouter);

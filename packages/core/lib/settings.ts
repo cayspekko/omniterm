@@ -3,6 +3,7 @@ import { homedir } from 'os';
 import path from 'path';
 import { SETTINGS_PATH } from './paths.js';
 import { displayNameForPath, repoIdForPath } from './ids.js';
+import { isGitRepo } from './gitDir.js';
 
 // The persisted settings file, owned here. These types used to live in
 // @omniterm/plugin-types because HostContext.settings() handed the whole file
@@ -28,7 +29,21 @@ export type TerminalRenderer = 'webgl' | 'dom';
 
 /** Persisted host settings, as handed to plugins by `HostContext.settings()`. */
 export interface Settings {
+  /**
+   * Every folder the user has opened as a workspace, in panel order: absolute
+   * paths spelled as the user gave them (see lib/ids.ts on why a symlink and its
+   * target stay two entries), deduped. Git is a capability detected on each
+   * entry by lib/workspaces.ts, never a separate list.
+   */
+  workspaces: string[];
+  /**
+   * @deprecated Derived from `workspaces` on every load/save (the entries that
+   * are git repo roots), so HostContext.repos(), allowedRoots and the terminal
+   * plugin keep working. Writing it still works for legacy callers — see
+   * saveSettings — but `workspaces` is the source of truth.
+   */
   trackedRepos: string[];
+  /** @deprecated The non-git counterpart of `trackedRepos`; same derivation. */
   trackedDirs: string[];
   lastActiveWorktree: string | null;
   sidebarCollapsed: boolean;
@@ -56,8 +71,8 @@ export interface Settings {
    */
   workspacesPanelDockedOpen: boolean;
   /**
-   * Whether the workspaces panel is filtered to workspaces that have a live
-   * tmux session. Applies to both display modes.
+   * @deprecated The panel no longer filters — live workspaces sort first
+   * instead. Still parsed so existing settings files round-trip unchanged.
    */
   workspaceFilterActiveOnly: boolean;
   /**
@@ -129,6 +144,7 @@ export interface Settings {
 }
 
 const DEFAULT_SETTINGS: Settings = {
+  workspaces: [],
   trackedRepos: [],
   trackedDirs: [],
   lastActiveWorktree: null,
@@ -166,6 +182,31 @@ function uniqueStrings(value: unknown): string[] {
 }
 
 /**
+ * Split `workspaces` back into the legacy repo/dir lists. Classified on disk
+ * each time rather than stored, so a folder that gains (or loses) a `.git`
+ * moves between them without any bookkeeping.
+ */
+function deriveLegacyTracking(workspaces: string[]): Pick<Settings, 'trackedRepos' | 'trackedDirs'> {
+  const trackedRepos: string[] = [];
+  const trackedDirs: string[] = [];
+  for (const p of workspaces) (isGitRepo(p) ? trackedRepos : trackedDirs).push(p);
+  return { trackedRepos, trackedDirs };
+}
+
+/**
+ * A legacy write (`saveSettings({ trackedRepos })`, or PUT /api/settings from an
+ * older client) replaces one of the two derived lists. Translate it into the
+ * equivalent `workspaces`: keep surviving entries in their current order, then
+ * append anything new. A list the caller left out stays as it is.
+ */
+function applyLegacyTracking(current: Settings, partial: Partial<Settings>): string[] {
+  const repos = partial.trackedRepos ? onlyStrings(partial.trackedRepos) : current.trackedRepos;
+  const dirs = partial.trackedDirs ? onlyStrings(partial.trackedDirs) : current.trackedDirs;
+  const wanted = new Set([...repos, ...dirs]);
+  return uniqueStrings([...current.workspaces.filter((p) => wanted.has(p)), ...repos, ...dirs]);
+}
+
+/**
  * Rekey `namingSchemes` from the legacy basename ids to the path-derived repo
  * ids introduced in lib/ids.ts. Without this every repo looks unassigned after
  * the upgrade and gets a fresh scheme, while the stale basename keys keep
@@ -179,13 +220,13 @@ function uniqueStrings(value: unknown): string[] {
  */
 export function migrateNamingSchemes(
   namingSchemes: Record<string, string>,
-  trackedRepos: string[],
+  workspaces: string[],
 ): Record<string, string> {
   const migrated = { ...namingSchemes };
   const claimedLegacyKeys = new Set<string>();
   let changed = false;
 
-  for (const repoPath of trackedRepos) {
+  for (const repoPath of workspaces) {
     const id = repoIdForPath(repoPath);
     if (migrated[id] !== undefined) continue;
     const legacyKey = displayNameForPath(repoPath);
@@ -239,10 +280,16 @@ export function loadSettings(): Settings {
     // array into null). Drop non-strings here: one bad element must not throw,
     // because the catch below would turn that into a silent reset to defaults
     // and the next save would overwrite the user's real repos and tabs.
-    settings.trackedRepos = uniqueStrings(settings.trackedRepos);
-    settings.trackedDirs = uniqueStrings(settings.trackedDirs);
+    //
+    // `workspaces` replaced the trackedRepos/trackedDirs split. A file written
+    // before it existed migrates repos-first, so the namingSchemes migration
+    // below still lets a repo claim its legacy key ahead of a same-named dir.
+    settings.workspaces = Array.isArray(parsed.workspaces)
+      ? uniqueStrings(parsed.workspaces)
+      : uniqueStrings([...onlyStrings(settings.trackedRepos), ...onlyStrings(settings.trackedDirs)]);
+    Object.assign(settings, deriveLegacyTracking(settings.workspaces));
     if (settings.namingSchemes && typeof settings.namingSchemes === 'object') {
-      settings.namingSchemes = migrateNamingSchemes(settings.namingSchemes, settings.trackedRepos);
+      settings.namingSchemes = migrateNamingSchemes(settings.namingSchemes, settings.workspaces);
     }
     return settings;
   } catch (e) {
@@ -263,10 +310,11 @@ export function loadSettings(): Settings {
     const workspaceDir = '/workspace';
     const hasWorkspace = existsSync(workspaceDir) && statSync(workspaceDir).isDirectory();
     const activePath = hasWorkspace ? workspaceDir : home;
-    const trackedDirs = hasWorkspace ? [workspaceDir, home] : [home];
+    const workspaces = hasWorkspace ? [workspaceDir, home] : [home];
     return {
       ...DEFAULT_SETTINGS,
-      trackedDirs,
+      workspaces,
+      ...deriveLegacyTracking(workspaces),
       activePath,
     };
   }
@@ -275,6 +323,14 @@ export function loadSettings(): Settings {
 export function saveSettings(partial: Partial<Settings>): Settings {
   const current = loadSettings();
   const updated = { ...current, ...partial };
+  if (partial.workspaces) {
+    updated.workspaces = uniqueStrings(partial.workspaces);
+  } else if (partial.trackedRepos || partial.trackedDirs) {
+    updated.workspaces = applyLegacyTracking(current, partial);
+  }
+  // Persist the derived lists too, so an older omniterm reading this file
+  // still sees every workspace.
+  Object.assign(updated, deriveLegacyTracking(updated.workspaces));
   // Deep-merge terminalTabs so saving one workspace doesn't erase others
   if (partial.terminalTabs) {
     updated.terminalTabs = { ...current.terminalTabs, ...partial.terminalTabs };
