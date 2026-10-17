@@ -4,6 +4,9 @@ import { useRef, useCallback, useEffect, forwardRef, type MutableRefObject } fro
 import { decodeOsc52Payload } from '../lib/osc52';
 import { track } from '../../../app/telemetryClient';
 
+/** Icons-only Nerd Font served from public/fonts (MIT, see its LICENSE). */
+const SYMBOLS_FONT = 'Symbols Nerd Font Mono';
+
 interface Props {
   sessionId: string;
   port: number;
@@ -94,8 +97,40 @@ const TerminalView = forwardRef<HTMLIFrameElement, Props>(function TerminalView(
         style.id = 'omniterm-terminal-style';
         style.textContent =
           '.xterm .xterm-viewport{scrollbar-width:none}' +
-          '.xterm .xterm-viewport::-webkit-scrollbar{display:none}';
+          '.xterm .xterm-viewport::-webkit-scrollbar{display:none}' +
+          `@font-face{font-family:'${SYMBOLS_FONT}';src:url('/fonts/SymbolsNerdFontMono-Regular.woff2') format('woff2')}`;
         iframeDoc.head.appendChild(style);
+      }
+
+      // Nerd Font icons (Powerlevel10k / Oh My Zsh prompts, lsd, ...) live in
+      // the Private Use Area, which ordinary monospace fonts lack. Append an
+      // icons-only font as the LAST fallback: the user's font still draws
+      // every regular character. xterm measures cells once, so set the option
+      // only after the font has loaded, then nudge ttyd to refit.
+      if (!(iframeDoc as any).__omniterm_symbols) {
+        (iframeDoc as any).__omniterm_symbols = true;
+        const iframeWin = iframe.contentWindow as any;
+        iframeDoc.fonts
+          ?.load(`16px '${SYMBOLS_FONT}'`, '')
+          .then(() => {
+            let attempts = 0;
+            const apply = () => {
+              const term = iframeWin?.term;
+              if (!term?.options) {
+                if (++attempts < 40) setTimeout(apply, 100);
+                return;
+              }
+              const family: string = term.options.fontFamily || 'monospace';
+              if (!family.includes(SYMBOLS_FONT)) {
+                term.options.fontFamily = `${family}, '${SYMBOLS_FONT}'`;
+                iframeWin.dispatchEvent(new Event('resize'));
+              }
+            };
+            apply();
+          })
+          .catch(() => {
+            // Font failed to load — icons stay as boxes, nothing else changes.
+          });
       }
 
       if (!(iframeDoc as any).__omniterm_contextmenu) {
