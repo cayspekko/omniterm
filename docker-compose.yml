@@ -1,16 +1,27 @@
 x-omniterm-env: &omniterm-env
   OMNITERM_TELEMETRY: "0"
   # The browser's clock. Match where you (and your IP) are: a UTC browser
-  # on a US address is a common bot signal.
-  TZ: "${TZ:-America/Boise}"
+  # on a US address is a common bot signal. Set TZ in your shell or `.env`.
+  TZ: "${TZ:-UTC}"
   # Remote browser window size and pixel density used before the panel
   # attaches. While the panel is open it resizes the page to match itself
   # (size and devicePixelRatio), so these are only the starting point.
   OMNITERM_BROWSER_WINDOW_SIZE: "1440,900"
   OMNITERM_BROWSER_SCALE: "2"
-  # Let the Files/git views and the folder picker reach /home (so the host
-  # home bind-mounted below is browsable), not just the container's $HOME.
-  OMNITERM_ALLOWED_ROOTS: /home
+
+# Machine-specific mounts and settings (your own folders, a timezone, extra
+# --allowed-roots) belong in docker-compose.override.yml, which compose loads
+# automatically and git ignores. For example, to work on host folders at the
+# same paths inside the container:
+#
+#   services:
+#     omniterm:
+#       environment:
+#         OMNITERM_ALLOWED_ROOTS: /home
+#       volumes:
+#         - type: bind
+#           source: /home/you
+#           target: /home/you
 
 services:
   omniterm:
@@ -33,12 +44,6 @@ services:
       - omniterm-home:/home/node
       - omniterm-settings:/home/node/.omniterm
       - ./:/home/node/work/omniterm
-      # The host home at the same path, so paths match on both sides. Add a
-      # folder under it from the Workspaces "Add" button to open it in
-      # omniterm (reachable via OMNITERM_ALLOWED_ROOTS above).
-      - type: bind
-        source: /home/dapplegate
-        target: /home/dapplegate
     shm_size: 1gb
     init: true
     restart: unless-stopped
@@ -64,10 +69,8 @@ services:
     volumes:
       - omniterm-dev-home:/home/node
       - omniterm-dev-settings:/home/node/.omniterm
-      - type: bind
-        source: /home/dapplegate
-        target: /home/dapplegate
-    working_dir: /home/dapplegate/git/omniterm
+      - ./:/home/node/work/omniterm
+    working_dir: /home/node/work/omniterm
     command:
       - sh
       - -c
