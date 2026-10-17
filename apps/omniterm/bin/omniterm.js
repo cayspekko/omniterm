@@ -51,6 +51,11 @@ Options:
                        (repeatable; env: OMNITERM_ALLOWED_ORIGINS, which
                        overrides). Same-host and X-Forwarded-Host origins are
                        always allowed. "*" disables the check (unsafe).
+  --allowed-roots <dirs>
+                       Comma-separated absolute directories the Files view,
+                       git view and folder picker may reach besides $HOME and
+                       tracked workspaces, e.g. /home (repeatable; env:
+                       OMNITERM_ALLOWED_ROOTS, which overrides)
   --no-telemetry       Disable telemetry for this run only
   --version, -v        Print version and exit
   --help, -h           Show this help
@@ -187,6 +192,14 @@ const ALLOWED_ORIGINS =
   process.env.OMNITERM_ALLOWED_ORIGINS ??
   (allowedOriginsFlags.length ? allowedOriginsFlags.join(',') : undefined);
 
+// --allowed-roots (repeatable) → OMNITERM_ALLOWED_ROOTS, same precedence.
+const allowedRootsFlags = [];
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--allowed-roots' && i + 1 < args.length) allowedRootsFlags.push(args[++i]);
+}
+const ALLOWED_ROOTS =
+  process.env.OMNITERM_ALLOWED_ROOTS ?? (allowedRootsFlags.length ? allowedRootsFlags.join(',') : undefined);
+
 const serverEntry = path.join(__dirname, '..', 'standalone', 'server', 'server.js');
 const clientEntry = path.join(__dirname, '..', 'standalone', 'client', 'index.html');
 
@@ -231,6 +244,7 @@ const child = spawn(process.execPath, [serverEntry, ...forwardedArgs], {
     OMNITERM_TTYD_PORT_MAX: TTYD_MAX,
     OMNITERM_VERSION: process.env.OMNITERM_VERSION ?? APP_VERSION,
     ...(ALLOWED_ORIGINS !== undefined ? { OMNITERM_ALLOWED_ORIGINS: ALLOWED_ORIGINS } : {}),
+    ...(ALLOWED_ROOTS !== undefined ? { OMNITERM_ALLOWED_ROOTS: ALLOWED_ROOTS } : {}),
     // --no-telemetry: disable for this run only (persistent opt-out is the
     // `omniterm telemetry off` command / the Settings toggle).
     ...(args.includes('--no-telemetry') ? { OMNITERM_TELEMETRY: '0' } : {}),

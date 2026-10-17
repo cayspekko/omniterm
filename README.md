@@ -164,6 +164,13 @@ turns the check off and is unsafe. This is not authentication: it cannot stop
 DNS rebinding, where an attacker's hostname resolves to your omniterm and so
 matches `Host`; keep omniterm off untrusted networks, or put real auth in front.
 
+**File access roots.** The Files view, git view, file previews and the
+workspace folder picker reach only your home directory and the workspaces you
+have added (terminals are not limited). To browse elsewhere — another user's
+home, a bind mount — add roots with `--allowed-roots /home,/srv/data`
+(comma-separated absolute paths, repeatable; or `OMNITERM_ALLOWED_ROOTS`, which
+takes precedence).
+
 ## Pass environment variables to terminals
 
 Every terminal omniterm opens starts from a clean environment: omniterm keeps a

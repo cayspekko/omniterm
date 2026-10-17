@@ -37,6 +37,7 @@ export { parseEnvPassthroughArgv, EnvNameError } from './lib/sessionEnv.js';
 // Origin check (cross-site request / WebSocket hijacking protection). startServer
 // installs it; the error is thrown for a malformed `allowedOrigins` entry.
 export { OriginConfigError, isOriginAllowed, parseAllowedOrigins } from './server/originCheck.js';
+export { AllowedRootsError, parseAllowedRoots } from './lib/allowedRoots.js';
 
 // Browser registry primitives — for plugin authors that want their tab's
 // MCP/sandbox child processes to register browsers and have them rendered
