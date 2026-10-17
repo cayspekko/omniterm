@@ -9,6 +9,8 @@ export interface OmnitermEvents {
   'omniterm:open-workspace': { path: string };
   /** Open a source tab, in diff mode when `diff` is set (files integration). */
   'omniterm:open-file': { path: string; diff?: 'worktree' | 'staged' };
+  /** Show a file in the Files tree: expand its folders, scroll to it (files integration). */
+  'omniterm:reveal-file': { path: string };
   /** New terminal tab in the active workspace, starting in `cwd` (terminal integration). */
   'omniterm:open-terminal': { cwd: string };
   /** The repo at `cwd` changed through the UI (stage/commit/checkout/...). */

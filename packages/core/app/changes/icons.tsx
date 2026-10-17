@@ -40,6 +40,22 @@ export const SourceControlIcon = (p: IconProps) => (
   </Stroke>
 );
 
+/** Open the file itself (not its diff). */
+export const OpenFileIcon = (p: IconProps) => (
+  <Stroke {...p}>
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <polyline points="14 2 14 8 20 8" />
+  </Stroke>
+);
+
+/** Reveal the file in the Files tree. */
+export const RevealIcon = (p: IconProps) => (
+  <Stroke {...p}>
+    <circle cx="11" cy="11" r="7" />
+    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+  </Stroke>
+);
+
 export const PlusIcon = (p: IconProps) => (
   <Stroke {...p}>
     <line x1="12" y1="5" x2="12" y2="19" />
