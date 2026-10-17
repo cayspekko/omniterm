@@ -24,6 +24,18 @@ test('buildTtydArgs: wires fontSize, session bind path, and port', () => {
   assert.ok(buildTtydArgs('s', 7700, {}).includes('fontSize=18'));
 });
 
+test('buildTtydArgs: passes a chosen font family and keeps ttyd\'s default otherwise', () => {
+  const args = buildTtydArgs('s', 7700, { terminalFontFamily: "  'MesloLGS NF', monospace " });
+  const i = args.indexOf(`fontFamily="'MesloLGS NF', monospace"`);
+  assert.ok(i > 0 && args[i - 1] === '-t');
+  for (const terminalFontFamily of [undefined, '', '   ']) {
+    assert.equal(
+      buildTtydArgs('s', 7700, { terminalFontFamily }).some((a) => a.startsWith('fontFamily=')),
+      false,
+    );
+  }
+});
+
 test('getTtydPidsToKill preserves duplicate ttyd listeners for live tmux sessions', () => {
   const psOutput = [
     '  100 ttyd --writable -i 127.0.0.1 -b /t/live-session/ -p 7700 -- bash',
