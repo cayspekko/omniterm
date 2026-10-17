@@ -127,3 +127,5 @@ RUN usermod -s /bin/zsh node
 ENV SHELL=/bin/zsh
 USER node
 ENTRYPOINT ["/usr/local/bin/omniterm-workstation-entrypoint"]
+# Setting ENTRYPOINT clears the CMD inherited from base, so restate it.
+CMD ["omniterm"]
