@@ -39,6 +39,8 @@ export interface SidebarPanel {
   label: string;
   /** Icon on the sidebar's section switcher. */
   icon: ReactNode;
+  /** Count pill on the switcher button (e.g. pending changes); hidden at 0. */
+  badge?: number;
   /** Section body. `closeSidebar` lets an overlay/mobile sidebar dismiss
    *  itself after the user picks something (e.g. opens a file). */
   render: (ctx: { isMobile: boolean; closeSidebar: () => void }) => ReactNode;

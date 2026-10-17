@@ -12,6 +12,7 @@ import {
 import WorkspacePanel, { WorkspaceHeaderActions } from './components/WorkspacePanel';
 import TabBar, { renderTabIcon, type CreateMenuEntry, type TabMenuItem } from './components/TabBar';
 import Sidebar, { WORKSPACES_SECTION } from './components/Sidebar';
+import StatusBar from './components/StatusBar';
 import SettingsPanel from './components/SettingsPanel';
 import ConfirmDialog from './components/ConfirmDialog';
 import { SettingsIcon, SidebarIcon } from './components/icons';
@@ -1491,6 +1492,7 @@ export default function Home(props: HomeProps) {
             </div>
           )}
         </div>
+        <StatusBar cwd={host.activePath} isMobile={host.isMobile} />
       </main>
 
       {host.pendingDeleteRepo && (
